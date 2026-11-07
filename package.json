@@ -1,0 +1,15 @@
+{
+  "name": "drones",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drone swarm flight-control algorithms with a 3D simulator: leader election and handover, formation reorganisation, low-energy comms and cooperative GNSS-denied localisation.",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/serve.mjs",
+    "test": "node --test tests/",
+    "sweep": "node tools/sweep.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

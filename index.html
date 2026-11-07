@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Swarm Simulator</title>
+    <link rel="stylesheet" href="src/ui/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo">◆</span> Swarm Simulator</div>
+      <div class="group">
+        <button id="btn-run" class="primary" title="Start / pause (Space)">▶ Start</button>
+        <button id="btn-step" title="Advance 1 s">Step</button>
+        <button id="btn-reset" title="Reset scenario">↺ Reset</button>
+        <label class="inline">Speed
+          <select id="speed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+            <option value="8">8×</option>
+            <option value="16">16×</option>
+          </select>
+        </label>
+      </div>
+      <div class="group modes" id="modes" title="What a click on the terrain does">
+        <button data-mode="orbit" class="active">🖱 View</button>
+        <button data-mode="origin">Set origin</button>
+        <button data-mode="destination">Set destination</button>
+        <button data-mode="beacon">Add landmark</button>
+        <button data-mode="nofly">Add no-fly zone</button>
+      </div>
+      <div class="group clock">
+        <span id="phase" class="badge">ready</span>
+        <span id="clock">t = 0.0 s</span>
+      </div>
+    </header>
+
+    <aside id="left" class="panel">
+      <div class="demo">
+        <label for="demo">Demo scenario</label>
+        <select id="demo"><option value="">— custom —</option></select>
+        <p id="demo-desc" class="demo-desc" hidden></p>
+      </div>
+      <div id="controls"></div>
+
+      <details open>
+        <summary>Failures &amp; operator</summary>
+        <div class="row">
+          <label>Target</label>
+          <select id="fail-target">
+            <option value="selected">Selected drone</option>
+            <option value="leader" selected>Current leader</option>
+            <option value="random">Random drone</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Failure</label>
+          <select id="fail-type">
+            <option value="crash">Motor failure (crash)</option>
+            <option value="radio">Radio failure (silent)</option>
+            <option value="battery">Battery fault (lands)</option>
+          </select>
+        </div>
+        <div class="btns">
+          <button id="btn-inject" class="danger">Inject now</button>
+          <button id="btn-kill-leader" class="danger" title="Crash the current leader (K)">Kill leader</button>
+        </div>
+        <div class="row">
+          <label>Schedule at</label>
+          <span class="inline"><input id="fail-at" type="number" min="1" value="60" step="5" /> s</span>
+          <button id="btn-schedule">Add</button>
+        </div>
+        <ul id="schedule" class="schedule"></ul>
+        <div class="row">
+          <label>Chaos mode <small>random failure every</small></label>
+          <span class="inline"><input id="chaos" type="range" min="0" max="120" step="5" value="0" /><output id="chaos-out">off</output></span>
+        </div>
+        <div class="btns">
+          <button id="btn-handover" title="Leader hands control to the best-scored follower">Force handover</button>
+          <button id="btn-replan">Replan route</button>
+        </div>
+      </details>
+
+      <details open>
+        <summary>View</summary>
+        <div class="toggles">
+          <label><input type="checkbox" data-view="follow" /> Follow swarm</label>
+          <label><input type="checkbox" data-view="estimates" checked /> Position estimates</label>
+          <label><input type="checkbox" data-view="links" checked /> Radio links</label>
+          <label><input type="checkbox" data-view="slots" /> Formation slots</label>
+          <label><input type="checkbox" data-view="trails" checked /> Trails</label>
+          <label><input type="checkbox" data-view="path" checked /> Planned route</label>
+          <label><input type="checkbox" data-view="labels" checked /> Labels</label>
+        </div>
+        <div class="btns">
+          <button id="btn-zoom" title="Zoom to the swarm (Z)">Zoom to swarm</button>
+          <button id="btn-overview" title="Show the whole map (O)">Map overview</button>
+        </div>
+      </details>
+
+      <details>
+        <summary>Scenario file</summary>
+        <div class="btns">
+          <button id="btn-export">Export JSON</button>
+          <button id="btn-import">Import JSON</button>
+          <input id="file-import" type="file" accept="application/json,.json" hidden />
+        </div>
+        <div class="btns">
+          <button id="btn-clear-zones">Clear no-fly zones &amp; landmarks</button>
+          <button id="btn-defaults">Defaults</button>
+        </div>
+      </details>
+    </aside>
+
+    <main id="viewport">
+      <div class="hud compass" title="North and wind (arrow = direction the wind blows to)">
+        <div id="rose" class="rose">
+          <span class="n">N</span>
+          <div id="wind-arrow" class="wind-arrow"></div>
+        </div>
+        <div id="wind-text" class="wind-text">4 m/s</div>
+      </div>
+      <div id="mode-hint" class="hud mode-hint" hidden></div>
+      <div id="dirty" class="hud dirty" hidden>Settings changed. <button id="btn-apply">Reset to apply</button></div>
+      <div class="hud legend">
+        <span><i style="background:#ffb020"></i>Leader</span>
+        <span><i style="background:#3fa9f5"></i>Follower</span>
+        <span><i style="background:#b06cff"></i>Radio lost</span>
+        <span><i style="background:#9aa4b2"></i>Landing</span>
+        <span><i style="background:#ff4d4f"></i>Crashed</span>
+        <span><i class="ring" style="border-color:#7ee0ff"></i>Own estimate</span>
+        <span><i style="background:#46e3b7"></i>Radio link</span>
+        <span><i style="background:#ffd84d"></i>Landmark fix</span>
+        <span><i style="background:#ff8a3d"></i>Route</span>
+      </div>
+    </main>
+
+    <aside id="right" class="panel">
+      <section>
+        <h3>Mission</h3>
+        <div id="status" class="status"></div>
+      </section>
+      <section>
+        <h3>Metrics <small class="keys"><b style="color:#7ee0ff">nav error</b> · <b style="color:#ff8a3d">formation error</b> (m) · <b style="color:#3ddc84">drones in swarm</b></small></h3>
+        <canvas id="chart"></canvas>
+      </section>
+      <section>
+        <h3>Drones <small>click to select</small></h3>
+        <table id="drones" class="drones">
+          <thead><tr><th>ID</th><th>Status</th><th>Battery</th><th title="True error of the drone's own position estimate">Nav err</th><th title="Drone's own uncertainty (1σ)">σ</th><th>Slot</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </section>
+      <section class="grow">
+        <h3>Event log</h3>
+        <ol id="log" class="log"></ol>
+      </section>
+    </aside>
+
+    <script type="module" src="src/ui/main.js"></script>
+  </body>
+</html>
