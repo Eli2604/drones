@@ -3,16 +3,17 @@
 
 import { DEFAULT_CONFIG, mergeConfig } from './config.js';
 import { Rng } from './rng.js';
-import { Terrain } from './terrain.js';
+import { Terrain, terrainParams } from './terrain.js';
 import { Weather } from './weather.js';
 import { Radio } from './comms.js';
 import { Drone } from './drone.js';
 import { planPath } from './planner.js';
-import { formationRadius, offsetToWorld } from './formation.js';
+import { slotOffsets, tableExtent, offsetToWorld } from './formation.js';
 import { dist, distH } from './vec.js';
 
 export const FAILURE_TYPES = {
   crash: 'motor failure (falls out of the sky)',
+  shot: 'shot down',
   radio: 'radio failure (keeps flying, silent)',
   battery: 'battery fault (drains fast, hands over and lands)',
 };
@@ -28,7 +29,7 @@ export class Simulation {
     const c = this.cfg;
     this.rng = new Rng(c.seed);
     const mapRng = new Rng(c.seed * 31 + 101);
-    if (!this.terrain || this.terrain.seed !== c.seed || this.terrain.preset !== c.terrain.preset || this.terrain.size !== c.terrain.size) {
+    if (!this.terrain || this.terrain.key !== JSON.stringify([c.terrain.size, c.terrain.res, c.seed, terrainParams(c.terrain)])) {
       this.terrain = new Terrain({ ...c.terrain, seed: c.seed });
     }
     this.weather = new Weather(c.weather);
@@ -55,6 +56,19 @@ export class Simulation {
     for (const b of c.customBeacons) {
       this.beacons.push({ id: this.beacons.length, x: b.x, z: b.z, y: this.terrain.heightAt(b.x, b.z), custom: true });
     }
+
+    // Anti-air threat sites (ground truth; the swarm has to discover them).
+    this.threats = [];
+    const tc = c.threats;
+    for (let i = 0, tries = 0; i < tc.count && tries < 500; tries++) {
+      const x = mapRng.uniform(-half, half), z = mapRng.uniform(-half, half);
+      if (distH({ x, z }, c.origin) < 450 || distH({ x, z }, c.destination) < 350) continue;
+      this.addThreat(x, z);
+      i++;
+    }
+    for (const p of tc.custom) this.addThreat(p.x, p.z, true);
+    this.shots = [];
+    this.explosions = [];
 
     // Spawn on the ground around the origin.
     this.drones = [];
@@ -109,29 +123,114 @@ export class Simulation {
     return this.drones.filter((d) => d.active && d.flying());
   }
 
-  formationRadius() {
+  /**
+   * Slot table (metres) for n drones under the current operator formation settings.
+   * `dispersed` spreads the formation out horizontally (reaction to enemy fire).
+   */
+  formationTable(n, dispersed = false) {
     const s = this.cfg.swarm;
-    return formationRadius(s.formation, s.count, s.spacing);
+    return slotOffsets(s.formation, n, s.spacing, { vSpread: s.vSpread, custom: s.customSlots, scaleH: dispersed ? 1.7 : 1 });
+  }
+  formationSig(dispersed = false) {
+    const s = this.cfg.swarm;
+    return JSON.stringify([s.formation, s.spacing, s.vSpread, s.formation === 'custom' ? s.customSlots : 0, dispersed]);
+  }
+  formationExtent() {
+    return tableExtent(this.formationTable(this.cfg.swarm.count));
+  }
+  formationRadius() {
+    return this.formationExtent().radius;
   }
 
-  planRoute(from) {
+  planRoute(from, avoid = []) {
     const c = this.cfg;
+    const ext = this.formationExtent();
     const res = planPath({
       terrain: this.terrain,
       start: from,
       goal: c.destination,
       wind: this.weather.baseWind(),
-      noFly: c.noFly,
+      noFly: [...c.noFly, ...avoid],
       opts: {
         gridN: 96,
-        clearance: c.swarm.cruiseAGL,
-        maxAltitude: c.swarm.maxAltitude,
-        corridor: Math.max(30, this.formationRadius() * 0.8),
+        // Lowest drone of a 3D formation must still clear the terrain by cruiseAGL.
+        clearance: c.swarm.cruiseAGL + ext.below,
+        // Highest drone must stay under the ceiling.
+        maxAltitude: c.swarm.maxAltitude - ext.above,
+        corridor: Math.max(30, ext.radius * 0.8),
         cruiseSpeed: c.swarm.cruiseSpeed,
       },
     });
     this.lastPlan = res;
     return res;
+  }
+
+  // ---------------------------------------------------------------- threats & effects
+  addThreat(x, z, custom = false) {
+    const t = { id: this.threats.length, x, z, y: this.terrain.heightAt(x, z), custom, nextShot: 0, shots: 0, kills: 0 };
+    this.threats.push(t);
+    return t;
+  }
+
+  /** Terrain masking: is the straight line from a to b above the ground everywhere? */
+  lineOfSight(a, b) {
+    const n = Math.max(4, Math.ceil(dist(a, b) / 15));
+    for (let k = 1; k < n; k++) {
+      const s = k / n;
+      const x = a.x + (b.x - a.x) * s, y = a.y + (b.y - a.y) * s, z = a.z + (b.z - a.z) * s;
+      if (this.terrain.heightAt(x, z) > y - 1) return false;
+    }
+    return true;
+  }
+
+  stepThreats() {
+    const tc = this.cfg.threats;
+    for (const th of this.threats) {
+      if (this.t < th.nextShot) continue;
+      const gun = { x: th.x, y: th.y + 4, z: th.z };
+      const cand = this.drones.filter(
+        (d) => d.flying() && d.status !== 'landing' && dist(gun, d.truePos) < tc.range && this.lineOfSight(gun, d.truePos),
+      );
+      if (!cand.length) {
+        th.nextShot = this.t + 0.5;
+        continue;
+      }
+      let target;
+      const nearest = () => cand.reduce((a, b) => (dist(gun, a.truePos) < dist(gun, b.truePos) ? a : b));
+      if (tc.targeting === 'leader') target = cand.find((d) => d.isLeader && d.active) ?? nearest();
+      else if (tc.targeting === 'random') target = this.rng.pick(cand);
+      else target = nearest();
+
+      const d = dist(gun, target.truePos);
+      const speed = Math.hypot(target.trueVel.x, target.trueVel.y, target.trueVel.z);
+      const p = tc.hitProb * (1 - 0.6 * (d / tc.range)) * (target.isEvading() ? 0.45 : 1) * Math.min(1, Math.max(0.5, 1.1 - speed / 30));
+      const hit = this.rng.next() < p;
+      th.shots++;
+      th.nextShot = this.t + tc.interval * this.rng.uniform(0.8, 1.2);
+      this.shots.push({ from: gun, to: { ...target.truePos }, hit, t: this.t, threat: th.id, target: target.id });
+      if (hit) {
+        th.kills++;
+        const role = target.isLeader ? 'leader ' : '';
+        target.crash(`${role}shot down by threat T${th.id}`, true);
+      }
+      // Muzzle flash / tracer seen by the target (if it survives) and drones near it.
+      for (const o of this.drones) {
+        if (!o.active || !o.flying() || o.status === 'crashed') continue;
+        const near = o === target || dist(o.truePos, target.truePos) < 220;
+        if (!near || this.rng.next() > 0.9) continue;
+        const errM = 15 + 0.06 * dist(o.truePos, gun);
+        const est = { x: th.x + this.rng.gauss(0, errM), z: th.z + this.rng.gauss(0, errM) };
+        o.onFiredUpon(est, o === target);
+      }
+    }
+    if (this.tick % 10 === 0) {
+      this.shots = this.shots.filter((s) => this.t - s.t < 1);
+      this.explosions = this.explosions.filter((e) => this.t - e.t < 2);
+    }
+  }
+
+  addExplosion(pos, big = false) {
+    this.explosions.push({ pos: { ...pos }, t: this.t, big });
   }
 
   // ---------------------------------------------------------------- callbacks from drones
@@ -226,6 +325,9 @@ export class Simulation {
       case 'crash':
         d.crash(`${role}motor failure (injected)`);
         break;
+      case 'shot':
+        d.crash(`${role}shot down by operator (injected)`, true);
+        break;
       case 'radio':
         d.radioOk = false;
         d.failure = 'radio';
@@ -268,6 +370,8 @@ export class Simulation {
       }
     }
 
+    if (this.threats.length) this.stepThreats();
+
     for (const { to, env } of this.radio.deliver()) {
       if (to.active && to.radioOk) to.receive(env);
     }
@@ -279,8 +383,8 @@ export class Simulation {
       for (let j = i + 1; j < fl.length; j++) {
         if (dist(fl[i].truePos, fl[j].truePos) < 1.2) {
           this.stats.collisions++;
-          fl[i].crash(`mid-air collision with D${fl[j].id}`);
-          fl[j].crash(`mid-air collision with D${fl[i].id}`);
+          fl[i].crash(`mid-air collision with D${fl[j].id}`, true);
+          fl[j].crash(`mid-air collision with D${fl[i].id}`, true);
         }
       }
     }

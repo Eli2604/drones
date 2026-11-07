@@ -8,7 +8,7 @@
 
 import { v3, clone, add, sub, scale, lenH, distH, clamp, clampH, headingOf, wrapAngle, norm } from './vec.js';
 import { Localizer } from './localization.js';
-import { slotOffsets, offsetToWorld, assignSlots, formationRadius } from './formation.js';
+import { offsetToWorld, assignSlots, formationRadius, tableExtent } from './formation.js';
 
 const G = 9.81;
 const FLYING = new Set(['takeoff', 'enroute', 'arrived', 'landing']);
@@ -61,6 +61,86 @@ export class Drone {
     this.lastPlanSent = -10;
     this.handoverDone = false;
     this.trail = [];
+
+    // Threat awareness
+    this.threats = new Map(); // key -> { x, z, r, n, t } estimated anti-air sites
+    this.threatSeq = 0;
+    this.underFireUntil = -1; // individual evasive manoeuvring
+    this.jink = null;
+    this.dispersalUntil = -1; // leader: spread the formation out
+    this.lastThreatReplan = -100;
+    this.lastCommandShift = -100;
+    this.lastThreatMsg = -100;
+  }
+
+  isEvading() {
+    return this.sim.t < this.underFireUntil;
+  }
+
+  // ---------------------------------------------------------------- threats
+  /** Called by the sensors when a shot is seen (muzzle flash / tracer), with an estimated origin. */
+  onFiredUpon(est, targeted) {
+    const t = this.sim.t;
+    const tc = this.cfg.threats;
+    if (!tc.reaction) return;
+    if (targeted) {
+      this.underFireUntil = t + 4;
+      this.sim.logOnce(`evade-${this.id}-${Math.floor(t / 10)}`, 'threat', `D${this.id} under fire - evasive manoeuvres`);
+    }
+    const isNew = this.learnThreat(est.x, est.z, tc.range * 1.1);
+    this.dispersalUntil = t + 20; // every member remembers the alarm (a new leader inherits it)
+    // Share what we saw (rate-limited); this is also the group's "under fire" alarm.
+    if (isNew || t - this.lastThreatMsg > 3) {
+      this.lastThreatMsg = t;
+      this.send('THREAT', { x: est.x, z: est.z, r: tc.range * 1.1, targeted, leaderTargeted: targeted && this.isLeader }, this.cfg.comms.ttl + 1);
+    }
+    if (this.isLeader) this.onThreatAlarm(isNew, est);
+    // Commander protection: a leader that is being shot at hands command to a healthy
+    // member OUTSIDE the threat's estimated range. (Handing over to someone still in range
+    // only moves the target and costs a formation reshuffle - measured to be worse.)
+    if (targeted && this.isLeader && tc.protectCommander && t - this.lastCommandShift > 15) {
+      let best = null, bestD = tc.range * 1.15;
+      for (const id of this.memberIds()) {
+        const p = this.peers.get(id);
+        if (id === this.id || !p || t - p.t > 3 || p.battery < 0.35) continue;
+        const d = Math.hypot(p.est.x - est.x, p.est.z - est.z);
+        if (d > bestD) (bestD = d), (best = id);
+      }
+      if (best !== null) {
+        this.lastCommandShift = t;
+        this.handover(best, 'commander under fire');
+      }
+    }
+  }
+
+  /** Merge an estimated threat position into the map. Returns true when it is new. */
+  learnThreat(x, z, r) {
+    for (const th of this.threats.values()) {
+      if (Math.hypot(th.x - x, th.z - z) < 180) {
+        th.x = (th.x * th.n + x) / (th.n + 1);
+        th.z = (th.z * th.n + z) / (th.n + 1);
+        th.n = Math.min(th.n + 1, 20);
+        th.t = this.sim.t;
+        return false;
+      }
+    }
+    this.threats.set(`${this.id}-${++this.threatSeq}`, { x, z, r, n: 1, t: this.sim.t });
+    return true;
+  }
+
+  /** Leader: the group is being engaged. Disperse, and reroute around newly found threats. */
+  onThreatAlarm(isNew, where) {
+    const t = this.sim.t;
+    this.reassign(); // picks up the dispersal state (no-op if already dispersed)
+    if (isNew && t - this.lastThreatReplan > 3) {
+      this.lastThreatReplan = t;
+      this.sim.log('threat', `Leader D${this.id}: threat located near (${where.x.toFixed(0)}, ${where.z.toFixed(0)}) - rerouting`);
+      this.replan('avoid threat');
+    }
+  }
+
+  threatZones() {
+    return [...this.threats.values()].map((th) => ({ x: th.x, z: th.z, r: th.r }));
   }
 
   // ---------------------------------------------------------------- helpers
@@ -214,6 +294,13 @@ export class Drone {
       case 'HANDOVER':
         this.onHandover(p);
         break;
+      case 'THREAT': {
+        if (!this.cfg.threats.reaction) break;
+        const isNew = this.learnThreat(p.x, p.z, p.r);
+        this.dispersalUntil = this.sim.t + 20;
+        if (this.isLeader) this.onThreatAlarm(isNew, p);
+        break;
+      }
     }
   }
 
@@ -252,8 +339,9 @@ export class Drone {
     this.arrived = p.arrived;
     this.departed = p.departed;
     if (p.formation.ver !== this.formation.ver) {
-      this.formation = { type: p.formation.type, spacing: p.formation.spacing, ver: p.formation.ver, slots: new Map(p.formation.slots) };
-      this.slotTable = slotOffsets(this.formation.type, this.formation.slots.size, this.formation.spacing);
+      // The leader ships the slot geometry itself, so any (custom) shape works.
+      this.formation = { ver: p.formation.ver, sig: p.formation.sig, slots: new Map(p.formation.slots) };
+      this.slotTable = p.formation.table;
     }
   }
 
@@ -383,8 +471,8 @@ export class Drone {
       score: this.score(),
       memberCount: this.memberIds().length,
       formation: {
-        type: this.formation.type,
-        spacing: this.formation.spacing,
+        sig: this.formation.sig,
+        table: this.slotTable,
         ver: this.formation.ver,
         slots: [...this.formation.slots.entries()],
       },
@@ -411,7 +499,13 @@ export class Drone {
   }
 
   replan(reason) {
-    const res = this.sim.planRoute(this.loc.est);
+    // Avoid known threats (+ margin); if that leaves no route, accept the risk.
+    const zones = this.threatZones().map((z) => ({ ...z, r: z.r + 60 }));
+    let res = this.sim.planRoute(this.loc.est, zones);
+    if (!res.ok && zones.length) {
+      this.sim.log('warn', `D${this.id}: no route around known threats - accepting exposure`);
+      res = this.sim.planRoute(this.loc.est);
+    }
     if (!res.ok) {
       this.sim.log('warn', `D${this.id} could not plan a route: ${res.reason}`);
       return false;
@@ -429,18 +523,25 @@ export class Drone {
     const ids = this.memberIds();
     const cur = [...this.formation.slots.keys()].sort((a, b) => a - b);
     const sw = this.cfg.swarm;
-    const changedSettings = this.formation.type !== sw.formation || this.formation.spacing !== sw.spacing;
+    const dispersed = this.sim.t < this.dispersalUntil;
+    const sig = this.sim.formationSig(dispersed);
+    const changedSettings = this.formation.sig !== sig;
     const same = ids.length === cur.length && ids.every((v, i) => v === cur[i]);
     if (same && !force && !changedSettings) return;
     const lost = cur.filter((id) => !ids.includes(id));
     const joined = cur.length ? ids.filter((id) => !cur.includes(id)) : [];
     const members = ids.map((id) => ({ id, pos: id === this.id ? this.loc.est : this.peers.get(id).est }));
-    const slots = assignSlots(members, this.id, this.loc.est, this.heading, sw.formation, sw.spacing);
-    this.formation = { type: sw.formation, spacing: sw.spacing, ver: this.sim.nextVer(), slots };
-    this.slotTable = slotOffsets(sw.formation, slots.size, sw.spacing);
+    const table = this.sim.formationTable(ids.length, dispersed);
+    const slots = assignSlots(members, this.id, this.loc.est, this.heading, table);
+    const wasDispersed = this.formation.sig ? JSON.parse(this.formation.sig)[4] : false;
+    this.formation = { ver: this.sim.nextVer(), sig, slots };
+    this.slotTable = table;
     if (lost.length) this.sim.log('reorg', `Leader D${this.id} lost contact with ${lost.map((i) => 'D' + i).join(', ')} - reorganising ${ids.length} drones`);
     if (joined.length) this.sim.log('reorg', `Leader D${this.id}: ${joined.map((i) => 'D' + i).join(', ')} joined - reorganising`);
-    if (changedSettings && !lost.length && !joined.length && cur.length) this.sim.log('reorg', `Formation changed to ${sw.formation} @ ${sw.spacing} m`);
+    if (changedSettings && !lost.length && !joined.length && cur.length) {
+      if (dispersed !== wasDispersed) this.sim.log('reorg', dispersed ? `Leader D${this.id}: under fire - dispersing formation` : `Leader D${this.id}: threat passed - closing up formation`);
+      else this.sim.log('reorg', `Formation changed to ${sw.formation} @ ${sw.spacing} m`);
+    }
   }
 
   protocolTick() {
@@ -543,7 +644,7 @@ export class Drone {
     const age = t - L.t;
     const lp = { x: L.est.x + L.vel.x * age, y: L.est.y, z: L.est.z + L.vel.z * age };
     const slot = this.formation.slots.get(this.id);
-    const sp = this.formation.spacing;
+    const sp = this.cfg.swarm.spacing;
     const off = slot !== undefined && this.slotTable[slot]
       ? this.slotTable[slot]
       : { f: -2 * sp, r: ((this.id % 5) - 2) * sp * 0.6, u: 6 }; // parking spot until assigned
@@ -554,8 +655,13 @@ export class Drone {
     return clampH(v, this.cfg.swarm.maxSpeed);
   }
 
+  /** Cruise height above the takeoff ground, raised so the lowest slot of a 3D formation clears it. */
+  hoverAlt() {
+    return this.groundY + this.cfg.swarm.cruiseAGL + this.sim.formationExtent().below;
+  }
+
   hover(est) {
-    return { x: 0, y: (this.groundY + this.cfg.swarm.cruiseAGL - est.y) * 0.5, z: 0 };
+    return { x: 0, y: (this.hoverAlt() - est.y) * 0.5, z: 0 };
   }
 
   guidance(t) {
@@ -581,6 +687,15 @@ export class Drone {
         else if (this.leaderState && t - this.leaderState.t < 4) v = this.followerGuidance(t);
         else v = { x: 0, y: 0, z: 0 }; // hold position while the swarm elects a leader
     }
+    // Evasive manoeuvring when targeted: random lateral/vertical jinks every ~0.8 s.
+    if (this.isEvading() && this.status !== 'takeoff') {
+      if (!this.jink || t > this.jink.until) {
+        const s = lenH(v) > 0.5 ? { x: v.x / lenH(v), z: v.z / lenH(v) } : { x: 1, z: 0 };
+        const side = this.sim.rng.next() < 0.5 ? -1 : 1;
+        this.jink = { x: -s.z * side * 7, y: this.sim.rng.uniform(-2.5, 3), z: s.x * side * 7, until: t + 0.8 };
+      }
+      v = { x: v.x + this.jink.x, y: v.y + this.jink.y, z: v.z + this.jink.z };
+    }
     // Terrain look-ahead on the onboard elevation map (DEM), from the drone's own estimate:
     // climb early, and slow down horizontally if the climb rate can't clear a slope ahead.
     const hs = lenH(v);
@@ -605,7 +720,7 @@ export class Drone {
     // velocity of nearby drones), using closest-point-of-approach prediction. Runs after
     // path/terrain shaping so nothing overrides it; conflicts are also resolved
     // vertically by id so two drones never dodge into each other.
-    const sep = Math.max(7, Math.min(12, this.formation.spacing * 0.45));
+    const sep = Math.max(7, Math.min(12, this.cfg.swarm.spacing * 0.45));
     // Horizon covers the braking distance at max speed (v^2 / 2a ~ 32 m at 18 m/s).
     for (const o of this.sim.proximity(this, 60)) {
       const vv = o.relVel;
@@ -660,12 +775,13 @@ export class Drone {
     this.sim.log('failure', `D${this.id} leaves the swarm and lands (${reason})`);
   }
 
-  crash(reason) {
+  crash(reason, explode = false) {
     if (this.status === 'crashed') return;
     this.status = 'crashed';
     this.active = false;
     this.isLeader = false;
     this.failure = reason;
+    this.sim.addExplosion(this.truePos, explode);
     this.sim.log('failure', `D${this.id} down: ${reason}`);
   }
 

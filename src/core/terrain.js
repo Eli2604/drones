@@ -1,12 +1,22 @@
 // Procedural heightmap terrain (fractal value noise). The map is square, centred on (0, 0).
 import { Rng } from './rng.js';
 
+// amp: max height (m); roughness: fractal persistence (how much small bumps matter);
+// freq: feature density (hills across the map); ridged: sharp crests; valley: carve a
+// valley along the SW-NE diagonal.
 export const TERRAIN_PRESETS = {
-  flat: { amp: 25, freq: 2, octaves: 3, ridged: false },
-  hills: { amp: 150, freq: 3, octaves: 5, ridged: false },
-  valley: { amp: 300, freq: 2.5, octaves: 5, ridged: false, valley: true },
-  mountains: { amp: 520, freq: 2.2, octaves: 6, ridged: true },
+  flat: { amp: 25, roughness: 0.45, freq: 2, ridged: false, valley: false },
+  hills: { amp: 150, roughness: 0.5, freq: 3, ridged: false, valley: false },
+  valley: { amp: 300, roughness: 0.5, freq: 2.5, ridged: false, valley: true },
+  mountains: { amp: 520, roughness: 0.5, freq: 2.2, ridged: true, valley: false },
 };
+
+/** Effective terrain parameters: preset values overridden by any non-null config values. */
+export function terrainParams(cfg) {
+  const p = { ...(TERRAIN_PRESETS[cfg.preset] ?? TERRAIN_PRESETS.hills) };
+  for (const k of ['amp', 'roughness', 'freq', 'ridged', 'valley']) if (cfg[k] !== null && cfg[k] !== undefined) p[k] = cfg[k];
+  return p;
+}
 
 const smooth = (t) => t * t * (3 - 2 * t);
 const smoothstep = (a, b, x) => {
@@ -15,22 +25,25 @@ const smoothstep = (a, b, x) => {
 };
 
 export class Terrain {
-  constructor({ size = 2400, res = 129, seed = 1, preset = 'hills' } = {}) {
+  constructor({ size = 2400, res = 129, seed = 1, preset = 'hills', ...overrides } = {}) {
     this.size = size;
     this.res = res;
     this.seed = seed;
     this.preset = preset;
+    this.params = terrainParams({ preset, ...overrides });
+    this.key = JSON.stringify([size, res, seed, this.params]);
     this.cell = size / (res - 1);
     this.heights = new Float32Array(res * res);
     this.generate();
   }
 
   generate() {
-    const p = TERRAIN_PRESETS[this.preset] ?? TERRAIN_PRESETS.hills;
+    const p = this.params;
     const rng = new Rng(this.seed * 7919 + 13);
     const lattices = [];
     let f = p.freq;
-    for (let o = 0; o < p.octaves; o++, f *= 2) {
+    const octaves = 6;
+    for (let o = 0; o < octaves; o++, f *= 2) {
       const n = Math.ceil(f) + 2;
       const data = new Float32Array(n * n);
       for (let i = 0; i < data.length; i++) data[i] = rng.next();
@@ -57,7 +70,7 @@ export class Terrain {
           }
           h += a * n;
           norm += a;
-          a *= 0.5;
+          a *= p.roughness;
         }
         h /= norm;
         if (p.valley) {

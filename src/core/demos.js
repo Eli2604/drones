@@ -37,6 +37,25 @@ export const DEMOS = {
       chaosInterval: 45,
     },
   },
+  ambush: {
+    title: 'Ambush: anti-air on the route',
+    description: 'Three hidden anti-air sites engage the swarm, shooting at the commander first. Drones that are shot at jink; the swarm shares where the fire came from, spreads out, reroutes around located sites, and the commander hands over to a drone out of range.',
+    config: {
+      seed: 5,
+      terrain: { preset: 'hills' },
+      swarm: { count: 9, formation: 'diamond', spacing: 26 },
+      threats: { count: 0, custom: [{ x: -300, z: 280 }, { x: 250, z: -180 }, { x: 520, z: -620 }], targeting: 'leader', hitProb: 0.35 },
+    },
+  },
+  'formation-3d': {
+    title: '3D formations showcase',
+    description: 'A 12-drone sphere over rugged ridges. Try switching formation live (star, box, helix…) or open the designer to draw your own.',
+    config: {
+      seed: 9,
+      terrain: { preset: 'mountains', amp: 380, roughness: 0.58 },
+      swarm: { count: 12, formation: 'sphere', spacing: 24, vSpread: 1.2 },
+    },
+  },
   'gnss-denied-fog': {
     title: 'Dense fog, poor odometry',
     description: 'Visibility ~170 m and 2.5x odometry drift: landmarks are rarely recognised, so the swarm leans on ranging between drones. Watch the nav error grow between fixes, then clear the fog.',

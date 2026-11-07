@@ -143,7 +143,67 @@ export class World3D {
     this.buildBeacons(sim.beacons);
     this.buildNoFly(sim.cfg.noFly);
     this.buildDrones(sim);
+    this.buildThreats(sim);
+    this.buildEffects();
     this.pathVer = -1;
+  }
+
+  /** Ground-truth anti-air sites with their engagement-range domes. */
+  buildThreats(sim) {
+    if (this.threatGroup) this.root.remove(this.threatGroup);
+    this.threatGroup = new THREE.Group();
+    this.threatObjs = [];
+    const R = sim.cfg.threats.range;
+    for (const th of sim.threats) {
+      const g = new THREE.Group();
+      g.position.set(th.x, th.y, th.z);
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(9, 12, 6, 12), new THREE.MeshStandardMaterial({ color: 0x4a1c22 }));
+      base.position.y = 3;
+      const turret = new THREE.Mesh(new THREE.BoxGeometry(10, 6, 10), new THREE.MeshStandardMaterial({ color: 0xff2d55, emissive: 0x440010 }));
+      turret.position.y = 9;
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 16, 8), new THREE.MeshStandardMaterial({ color: 0x222831 }));
+      barrel.rotation.x = Math.PI / 3;
+      barrel.position.set(0, 13, -5);
+      const domeMat = new THREE.MeshBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false });
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(R, 40, 16, 0, Math.PI * 2, 0, Math.PI / 2), domeMat);
+      const edgeMat = new THREE.LineBasicMaterial({ color: 0xff2d55, transparent: true, opacity: 0.25 });
+      const edge = new THREE.LineSegments(new THREE.WireframeGeometry(new THREE.SphereGeometry(R, 16, 6, 0, Math.PI * 2, 0, Math.PI / 2)), edgeMat);
+      const label = makeLabel(`T${th.id}`, 'threat');
+      label.position.y = 30;
+      g.add(base, turret, barrel, dome, edge, label);
+      this.threatGroup.add(g);
+      this.threatObjs.push({ g, dome, edge, turret, domeMat, edgeMat, builtR: R });
+    }
+    // What the swarm believes (leader's threat map): orange rings, pooled.
+    this.intel = [];
+    for (let i = 0; i < 24; i++) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(1, 0.006, 6, 96), new THREE.MeshBasicMaterial({ color: 0xff9f0a, transparent: true, opacity: 0.8 }));
+      ring.rotation.x = Math.PI / 2;
+      ring.visible = false;
+      const label = makeLabel('threat?', 'intel');
+      label.visible = false;
+      label.position.set(0, 0, 0);
+      ring.add(label);
+      this.threatGroup.add(ring);
+      this.intel.push({ ring, label });
+    }
+    this.root.add(this.threatGroup);
+  }
+
+  buildEffects() {
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(128 * 6), 3));
+    tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(128 * 6), 3));
+    this.tracers = new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.95 }));
+    this.tracers.frustumCulled = false;
+    this.booms = [];
+    for (let i = 0; i < 16; i++) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffa040, transparent: true, depthWrite: false }));
+      m.visible = false;
+      this.booms.push(m);
+      this.root.add(m);
+    }
+    this.root.add(this.tracers);
   }
 
   buildTerrain(terrain) {
@@ -410,6 +470,68 @@ export class World3D {
       a.needsUpdate = true;
       this.fixLines.geometry.setDrawRange(0, k * 2);
     }
+
+    // Threats: dome size follows the live range setting; turret flashes when firing.
+    if (this.threatObjs?.length !== sim.threats.length) this.buildThreats(sim);
+    const R = sim.cfg.threats.range;
+    sim.threats.forEach((th, i) => {
+      const o = this.threatObjs[i];
+      const k = R / o.builtR;
+      o.dome.scale.setScalar(k);
+      o.edge.scale.setScalar(k);
+      const recentShot = sim.shots.some((s) => s.threat === th.id && t - s.t < 0.3);
+      o.domeMat.opacity = recentShot ? 0.14 : 0.06;
+      o.turret.material.emissive.setHex(recentShot ? 0xff6020 : 0x440010);
+    });
+    {
+      const L = sim.leader;
+      const known = L ? [...L.threats.values()] : [];
+      this.intel.forEach((it, i) => {
+        const th = known[i];
+        it.ring.visible = !!th && view.threats !== false;
+        it.label.visible = it.ring.visible; // CSS2D labels don't inherit parent visibility
+        if (!th) return;
+        const y = this.terrain.heightAt(th.x, th.z) + 6;
+        it.ring.position.set(th.x, y, th.z);
+        it.ring.scale.setScalar(th.r);
+        it.label.position.set(0, 0, 0);
+      });
+    }
+    // Tracers (hit = red, miss = orange; misses pass beside the target)
+    {
+      const a = this.tracers.geometry.attributes.position, col = this.tracers.geometry.attributes.color;
+      let k = 0;
+      for (const s of sim.shots) {
+        const age = t - s.t;
+        if (age > 0.35 || k >= 128) continue;
+        const miss = s.hit ? 0 : 6;
+        const to = { x: s.to.x + miss * Math.sin(s.t * 7), y: s.to.y + miss * 0.5, z: s.to.z + miss * Math.cos(s.t * 7) };
+        // Draw a short streak travelling from the gun to the target.
+        const f0 = Math.min(1, age / 0.25), f1 = Math.max(0, f0 - 0.35);
+        const p = (f) => [s.from.x + (to.x - s.from.x) * f, s.from.y + (to.y - s.from.y) * f, s.from.z + (to.z - s.from.z) * f];
+        a.setXYZ(k * 2, ...p(f1));
+        a.setXYZ(k * 2 + 1, ...p(f0));
+        const c = s.hit ? [1, 0.25, 0.2] : [1, 0.75, 0.3];
+        col.setXYZ(k * 2, ...c);
+        col.setXYZ(k * 2 + 1, ...c);
+        k++;
+      }
+      a.needsUpdate = true;
+      col.needsUpdate = true;
+      this.tracers.geometry.setDrawRange(0, k * 2);
+    }
+    // Explosions
+    this.booms.forEach((m, i) => {
+      const e = sim.explosions[sim.explosions.length - 1 - i];
+      const age = e ? t - e.t : 99;
+      m.visible = age < 1.2;
+      if (!m.visible) return;
+      const size = (e.big ? 16 : 8) * (0.4 + age * 1.6);
+      m.position.set(e.pos.x, e.pos.y, e.pos.z);
+      m.scale.setScalar(size);
+      m.material.opacity = Math.max(0, 0.9 * (1 - age / 1.2));
+      m.material.color.setHex(age < 0.25 ? 0xfff0a0 : 0xff7a30);
+    });
 
     // Formation slots as the leader currently sees them
     {

@@ -29,6 +29,7 @@ export class Localizer {
     this.est = clone(pos);
     this.odo = clone(pos); // pure dead reckoning (+ landmark fixes), no ranging
     this.sigma = 0.5;
+    this.odoSigma = 0.5; // uncertainty of the odometry track alone (prior for ranging)
     const dl = cfg.driftLevel;
     this.scaleErr = rng.gauss(0, cfg.scaleErr * dl);
     this.bias = { x: rng.gauss(0, cfg.biasInit * dl), z: rng.gauss(0, cfg.biasInit * dl) };
@@ -57,9 +58,32 @@ export class Localizer {
     // Barometric altitude, complementary-filtered with vertical speed.
     this.est.y += this.measVel.y * dt;
     this.est.y += 0.1 * (trueY + rng.gauss(0, cfg.baroNoise) - this.est.y);
+    // Uncertainty growth: scale-factor and bias errors accumulate linearly in time;
+    // white velocity noise only as a random walk (variance ~ n^2 * dt per step).
     const speed = lenH(trueVel);
-    const growth = (Math.abs(cfg.scaleErr) * speed + cfg.biasInit + n) * dl * dt;
-    this.sigma = Math.min(500, this.sigma + growth);
+    const lin = (cfg.scaleErr * speed + cfg.biasInit) * dl * dt;
+    const grow = (s) => Math.min(500, Math.sqrt((s + lin) ** 2 + n * n * dt * dt));
+    this.sigma = grow(this.sigma);
+    this.odoSigma = grow(this.odoSigma);
+  }
+
+  /**
+   * Odometry acts as a prior: a relative correction (ranging, group anchor) may not move
+   * the estimate further from the odometry track than odometry's own uncertainty allows.
+   * Without this, geometry that cannot observe some direction (e.g. drones in a line
+   * abreast can't see along-track error) lets the estimate run away, and the formation
+   * controller then flies the drone after it.
+   */
+  priorLimit() {
+    return 1.5 * this.odoSigma + 5;
+  }
+  clampToPrior(nx, nz) {
+    const gx = nx - this.odo.x, gz = nz - this.odo.z;
+    const gap = Math.hypot(gx, gz), lim = this.priorLimit();
+    if (gap <= lim) return { x: nx, z: nz };
+    const oldGap = Math.hypot(this.est.x - this.odo.x, this.est.z - this.odo.z);
+    const keep = Math.max(lim, Math.min(gap, oldGap)); // never push further out
+    return { x: this.odo.x + (gx * keep) / gap, z: this.odo.z + (gz * keep) / gap };
   }
 
   /** Range measurement to a neighbour whose estimate and uncertainty were in the packet. */
@@ -71,8 +95,9 @@ export class Localizer {
     const s2 = this.sigma ** 2, n2 = nSigma ** 2 + rangeNoise ** 2;
     if (Math.abs(res) > 4 * Math.sqrt(s2 + n2) + 3) return; // outlier gate
     const k = (0.5 * s2) / (s2 + n2);
-    this.est.x += (k * res * dx) / d;
-    this.est.z += (k * res * dz) / d;
+    const p = this.clampToPrior(this.est.x + (k * res * dx) / d, this.est.z + (k * res * dz) / d);
+    this.est.x = p.x;
+    this.est.z = p.z;
     if (nSigma < this.sigma) {
       // A range only constrains one direction, so shrink uncertainty conservatively.
       const w = 0.15 * k;
@@ -83,8 +108,9 @@ export class Localizer {
 
   /** Shift the estimate towards the group-odometry anchor broadcast by the leader. */
   applyGroupAnchor(offset, gain = 0.3) {
-    this.est.x += gain * offset.x;
-    this.est.z += gain * offset.z;
+    const p = this.clampToPrior(this.est.x + gain * offset.x, this.est.z + gain * offset.z);
+    this.est.x = p.x;
+    this.est.z = p.z;
   }
 
   /** Absolute position fix (e.g. a recognised landmark). */
@@ -93,10 +119,12 @@ export class Localizer {
     const k = s2 / (s2 + sigmaMeas ** 2);
     this.est.x += k * (meas.x - this.est.x);
     this.est.z += k * (meas.z - this.est.z);
-    // Landmarks are absolute truth for the odometry track too.
-    this.odo.x += k * (meas.x - this.odo.x);
-    this.odo.z += k * (meas.z - this.odo.z);
     this.sigma = Math.max(0.3, Math.sqrt((1 - k) * s2));
+    // Landmarks are absolute truth for the odometry track too (with its own gain).
+    const o2 = this.odoSigma ** 2, ko = o2 / (o2 + sigmaMeas ** 2);
+    this.odo.x += ko * (meas.x - this.odo.x);
+    this.odo.z += ko * (meas.z - this.odo.z);
+    this.odoSigma = Math.max(0.3, Math.sqrt((1 - ko) * o2));
     this.fixes++;
   }
 }

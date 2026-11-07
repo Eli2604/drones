@@ -1,8 +1,9 @@
 // UI controller: builds the settings panel, runs the simulation loop, wires interactions.
 import { Simulation } from '../core/sim.js';
 import { DEFAULT_CONFIG, cloneConfig, mergeConfig, getPath, setPath } from '../core/config.js';
-import { FORMATIONS } from '../core/formation.js';
-import { TERRAIN_PRESETS } from '../core/terrain.js';
+import { FORMATIONS, FORMATION_LABELS, shapeUnits } from '../core/formation.js';
+import { TERRAIN_PRESETS, terrainParams } from '../core/terrain.js';
+import { FormationDesigner } from './designer.js';
 import { DEMOS } from '../core/demos.js';
 import { World3D } from './scene.js';
 import { Chart } from './chart.js';
@@ -16,16 +17,28 @@ const SCHEMA = [
     title: 'Scenario',
     items: [
       { path: 'seed', label: 'Random seed', type: 'number', min: 1, max: 99999 },
-      { path: 'terrain.preset', label: 'Terrain', type: 'select', options: Object.keys(TERRAIN_PRESETS) },
       { path: 'nav.beaconCount', label: 'Landmarks (known geolocation)', type: 'range', min: 0, max: 40, step: 1 },
+    ],
+  },
+  {
+    title: 'Terrain',
+    items: [
+      { path: 'terrain.preset', label: 'Preset', type: 'select', options: Object.keys(TERRAIN_PRESETS) },
+      { path: 'terrain.amp', label: 'Max height', type: 'range', min: 0, max: 900, step: 10, unit: 'm' },
+      { path: 'terrain.roughness', label: 'Roughness', type: 'range', min: 0.25, max: 0.8, step: 0.01 },
+      { path: 'terrain.freq', label: 'Hill density', type: 'range', min: 0.5, max: 8, step: 0.1 },
+      { path: 'terrain.ridged', label: 'Sharp ridges', type: 'checkbox' },
+      { path: 'terrain.valley', label: 'Carve valley (SW→NE)', type: 'checkbox' },
     ],
   },
   {
     title: 'Swarm',
     items: [
       { path: 'swarm.count', label: 'Drones', type: 'range', min: 2, max: 20, step: 1 },
-      { path: 'swarm.formation', label: 'Formation', type: 'select', options: FORMATIONS, live: true },
+      { path: 'swarm.formation', label: 'Formation', type: 'select', options: FORMATIONS, labels: FORMATION_LABELS, live: true },
+      { type: 'button', label: '✎ Design custom formation…', action: () => openDesigner() },
       { path: 'swarm.spacing', label: 'Spacing', type: 'range', min: 10, max: 60, step: 1, unit: 'm', live: true },
+      { path: 'swarm.vSpread', label: 'Vertical spread', type: 'range', min: 0, max: 2, step: 0.05, unit: '×', live: true },
       { path: 'swarm.cruiseSpeed', label: 'Cruise speed', type: 'range', min: 4, max: 18, step: 0.5, unit: 'm/s', live: true },
       { path: 'swarm.cruiseAGL', label: 'Cruise height above terrain', type: 'range', min: 20, max: 150, step: 5, unit: 'm' },
       { path: 'swarm.maxAltitude', label: 'Altitude ceiling', type: 'range', min: 150, max: 900, step: 10, unit: 'm' },
@@ -47,6 +60,18 @@ const SCHEMA = [
       { path: 'weather.turbulence', label: 'Turbulence', type: 'range', min: 0, max: 1, step: 0.05 },
       { path: 'weather.precipitation', label: 'Rain', type: 'range', min: 0, max: 1, step: 0.05 },
       { path: 'weather.fog', label: 'Fog', type: 'range', min: 0, max: 1, step: 0.05 },
+    ],
+  },
+  {
+    title: 'Enemy fire',
+    items: [
+      { path: 'threats.count', label: 'Random anti-air sites', type: 'range', min: 0, max: 12, step: 1 },
+      { path: 'threats.range', label: 'Engagement range', type: 'range', min: 100, max: 800, step: 10, unit: 'm', live: true },
+      { path: 'threats.interval', label: 'Time between shots', type: 'range', min: 0.5, max: 10, step: 0.5, unit: 's', live: true },
+      { path: 'threats.hitProb', label: 'Hit probability', type: 'range', min: 0, max: 1, step: 0.05, live: true },
+      { path: 'threats.targeting', label: 'Enemy targets', type: 'select', options: ['leader', 'nearest', 'random'], labels: { leader: 'Commander first', nearest: 'Nearest drone', random: 'Random drone' }, live: true },
+      { path: 'threats.reaction', label: 'Swarm reacts (evade, disperse, share, reroute)', type: 'checkbox', live: true },
+      { path: 'threats.protectCommander', label: 'Commander hands over when under fire', type: 'checkbox', live: true },
     ],
   },
   {
@@ -94,6 +119,33 @@ const chart = new Chart($('#chart'));
 world.build(sim);
 world.setWeather(sim.weather);
 
+// ------------------------------------------------------------------ formation designer
+const designer = new FormationDesigner($('#viewport'));
+function openDesigner() {
+  const sw = state.cfg.swarm;
+  // Start from what is flying now, so a preset can be tweaked into a custom shape.
+  const slots = sw.formation === 'custom' ? sw.customSlots : shapeUnits(sw.formation, sw.count).slice(1);
+  designer.open({
+    slots,
+    count: sw.count,
+    spacing: sw.spacing,
+    vSpread: sw.vSpread,
+    onApply: (s) => {
+      state.cfg.swarm.customSlots = s;
+      state.cfg.swarm.formation = 'custom';
+      sim.cfg.swarm.customSlots = s;
+      sim.cfg.swarm.formation = 'custom';
+      syncControlValues();
+      saveConfig();
+      if (!state.view.slots) {
+        state.view.slots = true;
+        document.querySelector('[data-view="slots"]').checked = true;
+      }
+      flash('Custom formation applied - the leader reorganises the swarm');
+    },
+  });
+}
+
 // ------------------------------------------------------------------ settings panel
 function fmt(v, item) {
   const n = Number(v);
@@ -128,15 +180,32 @@ function buildControls() {
     for (const item of sec.items) {
       const live = sec.live || item.live;
       const row = document.createElement('div');
-      const val = getPath(state.cfg, item.path);
+      if (item.type === 'button') {
+        row.className = 'btns';
+        const b = document.createElement('button');
+        b.textContent = item.label;
+        b.onclick = item.action;
+        row.appendChild(b);
+        det.appendChild(row);
+        continue;
+      }
+      const val = displayValue(item.path);
       let input;
       if (item.type === 'select') {
         row.className = 'row';
         input = document.createElement('select');
-        for (const o of item.options) input.add(new Option(o, o));
+        for (const o of item.options) input.add(new Option(item.labels?.[o] ?? o, o));
         input.value = val;
         row.innerHTML = `<label>${item.label}</label>`;
         row.appendChild(input);
+      } else if (item.type === 'checkbox') {
+        row.className = 'row check';
+        const lab = document.createElement('label');
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = !!val;
+        lab.append(input, ` ${item.label}`);
+        row.appendChild(lab);
       } else if (item.type === 'number') {
         row.className = 'row';
         input = document.createElement('input');
@@ -154,10 +223,15 @@ function buildControls() {
       }
       input.dataset.path = item.path;
       input.addEventListener('input', () => {
-        const v = item.type === 'select' ? input.value : Number(input.value);
+        const v = item.type === 'select' ? input.value : item.type === 'checkbox' ? input.checked : Number(input.value);
         setPath(state.cfg, item.path, v);
         const out = row.querySelector('output');
         if (out) out.textContent = fmt(v, item);
+        if (item.path === 'terrain.preset') {
+          // A preset loads its shape parameters into the sliders.
+          Object.assign(state.cfg.terrain, { ...TERRAIN_PRESETS[v] });
+          syncControlValues();
+        }
         if (live) {
           setPath(sim.cfg, item.path, v);
           if (item.path.startsWith('weather.')) {
@@ -177,10 +251,18 @@ function buildControls() {
   }
 }
 
+/** Config value as shown in the panel (terrain shape falls back to the preset's value). */
+function displayValue(path) {
+  const v = getPath(state.cfg, path);
+  if ((v === null || v === undefined) && path.startsWith('terrain.')) return terrainParams(state.cfg.terrain)[path.split('.')[1]];
+  return v;
+}
+
 function syncControlValues() {
   for (const input of document.querySelectorAll('#controls [data-path]')) {
-    const v = getPath(state.cfg, input.dataset.path);
-    input.value = v;
+    const v = displayValue(input.dataset.path);
+    if (input.type === 'checkbox') input.checked = !!v;
+    else input.value = v;
     const out = input.parentElement.querySelector('output');
     const item = SCHEMA.flatMap((s) => s.items).find((i) => i.path === input.dataset.path);
     if (out && item) out.textContent = fmt(v, item);
@@ -234,6 +316,8 @@ const HINTS = {
   destination: 'Click the terrain to set the DESTINATION (the leader replans in flight)',
   beacon: 'Click the terrain to place a landmark with known geolocation',
   nofly: 'Click the terrain to place a no-fly zone (r = 150 m); the leader replans',
+  threat: 'Click the terrain to place an anti-air site (the swarm does not know where it is)',
+  shoot: 'Click a drone to shoot it down',
 };
 function setMode(m) {
   state.mode = m;
@@ -246,10 +330,15 @@ for (const b of document.querySelectorAll('#modes button')) b.onclick = () => se
 
 function onPick(hit) {
   if (hit.type === 'drone') {
+    if (state.mode === 'shoot') {
+      shootDrone(hit.id);
+      return;
+    }
     state.selected = state.selected === hit.id ? null : hit.id;
     updatePanels();
     return;
   }
+  if (state.mode === 'shoot') return;
   const p = { x: Math.round(hit.point.x), z: Math.round(hit.point.z) };
   switch (state.mode) {
     case 'origin':
@@ -275,11 +364,39 @@ function onPick(hit) {
       if (sim.phase !== 'ready') sim.requestReplan();
       break;
     }
+    case 'threat':
+      state.cfg.threats.custom.push(p);
+      sim.cfg.threats.custom.push({ ...p });
+      sim.addThreat(p.x, p.z, true);
+      world.buildThreats(sim);
+      break;
     default:
       state.selected = null;
   }
   saveConfig();
 }
+
+// ------------------------------------------------------------------ operator kills
+function shootDrone(id) {
+  if (sim.phase === 'ready') return flash('Start the mission first');
+  const d = sim.injectFailure(id, 'shot');
+  if (!d) flash(`D${id} is not flying`);
+  updatePanels();
+}
+function failSelected(type) {
+  if (state.selected === null) return;
+  if (sim.phase === 'ready') return flash('Start the mission first');
+  if (!sim.injectFailure(state.selected, type)) flash(`D${state.selected} is not flying`);
+  updatePanels();
+}
+$('#sel-shoot').onclick = () => failSelected('shot');
+$('#sel-radio').onclick = () => failSelected('radio');
+$('#sel-battery').onclick = () => failSelected('battery');
+$('#sel-focus').onclick = () => state.selected !== null && world.zoomTo(sim.drones[state.selected].truePos, 220);
+$('#sel-close').onclick = () => {
+  state.selected = null;
+  updatePanels();
+};
 
 // ------------------------------------------------------------------ failures & operator
 function failTarget() {
@@ -379,6 +496,7 @@ $('#file-import').onchange = async (e) => {
 $('#btn-clear-zones').onclick = () => {
   state.cfg.noFly = [];
   state.cfg.customBeacons = [];
+  state.cfg.threats.custom = [];
   saveConfig();
   resetSim();
 };
@@ -475,8 +593,22 @@ function updatePanels() {
     ['Visibility', `${sim.weather.visibility().toFixed(0)} m`],
     ['Collisions', `${sim.stats.collisions}`],
   ];
+  if (sim.threats.length) {
+    const shots = sim.threats.reduce((a, t) => a + t.shots, 0), kills = sim.threats.reduce((a, t) => a + t.kills, 0);
+    rows.splice(6, 0, ['Enemy shots / kills', `${shots} / ${kills}`], ['Threats located by swarm', L ? `${L.threats.size} / ${sim.threats.length}` : '-']);
+  }
   if (sim.arrivalTime !== null) rows.unshift(['Arrived', `t = ${sim.arrivalTime.toFixed(1)} s`]);
   $('#status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+
+  // Selected-drone action panel
+  const sd = state.selected !== null ? sim.drones[state.selected] : null;
+  $('#sel-hud').hidden = !sd;
+  if (sd) {
+    const role = sd.isLeader && sd.radioOk ? '★ leader' : 'follower';
+    $('#sel-title').textContent = `D${sd.id} · ${role} · ${sd.status}${!sd.radioOk ? ' · no radio' : ''} · battery ${(sd.batteryFrac() * 100).toFixed(0)}%`;
+    const can = sd.flying() && sd.status !== 'landing' && sim.phase !== 'ready';
+    for (const id of ['#sel-shoot', '#sel-radio', '#sel-battery']) $(id).disabled = !can;
+  }
 
   const tb = $('#drones tbody');
   tb.innerHTML = sim.drones
@@ -495,7 +627,8 @@ function updatePanels() {
         <td><span class="bar"><i style="width:${(bf * 100).toFixed(0)}%;background:${color}"></i></span>${(bf * 100).toFixed(0)}%</td>
         <td>${d.flying() ? err.toFixed(1) : '-'}</td>
         <td>${d.flying() ? d.loc.sigma.toFixed(1) : '-'}</td>
-        <td>${slot}</td></tr>`;
+        <td>${slot}</td>
+        <td>${d.flying() && d.status !== 'landing' ? `<button class="kill" data-kill="${d.id}" title="Shoot down D${d.id}">✖</button>` : ''}</td></tr>`;
     })
     .join('');
 
@@ -509,7 +642,13 @@ function updatePanels() {
   if (sim.tick % 10 === 0) renderSchedule();
   updateRunButton();
 }
-$('#drones tbody').addEventListener('click', (e) => {
+// pointerdown, not click: the table re-renders 4x per second, which can swallow clicks.
+$('#drones tbody').addEventListener('pointerdown', (e) => {
+  const kill = e.target.closest('[data-kill]');
+  if (kill) {
+    shootDrone(Number(kill.dataset.kill));
+    return;
+  }
   const tr = e.target.closest('tr');
   if (!tr) return;
   const id = Number(tr.dataset.id);
@@ -559,9 +698,14 @@ if (params.has('follow')) state.view.follow = true;
 document.querySelector('[data-view="follow"]').checked = state.view.follow;
 if (params.has('skip')) sim.run(Number(params.get('skip')) || 0);
 if (params.has('zoom')) zoomToSwarm();
+if (params.has('select')) state.selected = Number(params.get('select'));
 if (params.get('autorun') === '1') state.running = true;
 
 buildControls();
 syncControlValues();
 updatePanels();
+if (params.has('designer')) openDesigner();
 requestAnimationFrame(frame);
+
+// Debug / test handle (used by tools/ui-check.mjs and handy in the browser console).
+window.__swarm = { sim, state, world, designer };

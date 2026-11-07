@@ -4,13 +4,19 @@ import { WEATHER_DEFAULTS } from './weather.js';
 export const DEFAULT_CONFIG = {
   seed: 7,
   dt: 0.1, // simulation step (s)
-  terrain: { preset: 'hills', size: 2400, res: 129 },
+  // amp / roughness / freq / ridged / valley override the preset's values (null = preset).
+  terrain: { preset: 'hills', size: 2400, res: 129, amp: null, roughness: null, freq: null, ridged: null, valley: null },
   origin: { x: -850, z: 850 },
   destination: { x: 850, z: -850 },
   swarm: {
     count: 7,
     formation: 'v',
     spacing: 25, // m between neighbouring slots
+    vSpread: 1, // vertical scale of the formation relative to its horizontal spacing
+    customSlots: [ // designer formation, spacing units, leader implied at (0,0,0)
+      { f: 1, r: 0, u: 0.5 }, { f: 0, r: -1, u: 0 }, { f: 0, r: 1, u: 0 }, { f: -1, r: 0, u: -0.5 },
+      { f: 0, r: 0, u: 1 }, { f: 0, r: 0, u: -1 },
+    ],
     cruiseSpeed: 12, // m/s
     maxSpeed: 18, // m/s
     cruiseAGL: 40, // m above terrain the route is planned at
@@ -52,6 +58,16 @@ export const DEFAULT_CONFIG = {
     cameraRange: 250, // m, max slant range to recognise a landmark
     beaconDetectRate: 0.8, // recognitions per second while in view (clear weather)
     beaconCount: 14,
+  },
+  threats: {
+    count: 0, // randomly placed anti-air sites (away from origin/destination)
+    custom: [], // [{x, z}] placed by the operator
+    range: 350, // m engagement range (needs line of sight; terrain masks)
+    interval: 2.5, // s between shots per site
+    hitProb: 0.35, // base hit probability at point-blank on a non-evading drone
+    targeting: 'leader', // 'leader' (commander first) | 'nearest' | 'random'
+    protectCommander: true, // a leader under fire hands command to a drone far from the threat
+    reaction: true, // swarm reacts: evasion, dispersal, threat sharing, rerouting
   },
   noFly: [], // [{x, z, r}]
   customBeacons: [], // [{x, z}]

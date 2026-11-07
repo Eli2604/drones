@@ -13,7 +13,8 @@ const HEADER_BYTES = 10;
 export function msgBytes(msg) {
   const p = msg.payload ?? {};
   switch (msg.type) {
-    case 'HB': return HEADER_BYTES + 44 + 3 * (p.formation?.slots?.length ?? 0);
+    case 'HB': return HEADER_BYTES + 44 + 9 * (p.formation?.slots?.length ?? 0); // id+slot+3x int16 offset
+    case 'THREAT': return HEADER_BYTES + 10;
     case 'STATUS': return HEADER_BYTES + 32;
     case 'PLAN': return HEADER_BYTES + 12 + 12 * (p.waypoints?.length ?? 0);
     case 'ELECT': return HEADER_BYTES + 12;

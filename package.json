@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node tools/serve.mjs",
     "test": "node --test tests/",
-    "sweep": "node tools/sweep.mjs"
+    "sweep": "node tools/sweep.mjs",
+    "sweep:combat": "node tools/sweep.mjs 20 --combat",
+    "ui-check": "node tools/ui-check.mjs"
   },
   "engines": {
     "node": ">=18"

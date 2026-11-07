@@ -1,8 +1,36 @@
 // Monte-Carlo robustness sweep: many seeds x terrains, each with scripted failures.
-// Usage: node tools/sweep.mjs [seeds=40]
+// Usage: node tools/sweep.mjs [seeds=40]            robustness (failures)
+//        node tools/sweep.mjs [seeds=20] --combat   enemy fire: reaction on/off comparison
 import { Simulation } from '../src/core/sim.js';
 
 const SEEDS = Number(process.argv[2] ?? 40);
+
+if (process.argv.includes('--combat')) {
+  const variants = {
+    'no reaction': { reaction: false, protectCommander: false },
+    'reaction, no commander handover': { reaction: true, protectCommander: false },
+    'full reaction': { reaction: true, protectCommander: true },
+  };
+  console.log(`3 random anti-air sites, commander targeted first, 9 drones, hills, ${SEEDS} seeds`);
+  for (const [name, v] of Object.entries(variants)) {
+    let lost = 0, leaders = 0, arrived = 0, time = 0;
+    for (let seed = 1; seed <= SEEDS; seed++) {
+      const sim = new Simulation({ seed, terrain: { preset: 'hills' }, swarm: { count: 9 }, threats: { count: 3, targeting: 'leader', ...v } });
+      for (let i = 0; i < 70 && !sim.arrivalTime; i++) sim.run(10);
+      if (sim.arrivalTime) (arrived++, (time += sim.arrivalTime));
+      lost += sim.drones.filter((d) => d.status === 'crashed').length;
+      leaders += sim.drones.filter((d) => d.status === 'crashed' && d.failure.startsWith('leader')).length;
+    }
+    console.log(
+      name.padEnd(34),
+      `arrived ${arrived}/${SEEDS}`.padEnd(14),
+      `drones lost ${(lost / SEEDS).toFixed(2)}/9`.padEnd(20),
+      `commanders lost ${(leaders / SEEDS).toFixed(2)}`.padEnd(22),
+      `mean arrival ${(time / Math.max(1, arrived)).toFixed(0)} s`,
+    );
+  }
+  process.exit(0);
+}
 const PRESETS = ['flat', 'hills', 'valley', 'mountains'];
 const FAILURES = [
   { t: 30, target: 'leader', type: 'crash' },

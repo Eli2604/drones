@@ -126,15 +126,72 @@ test('planner avoids no-fly zones and respects the ceiling', () => {
   }
 });
 
-test('slot assignment is a permutation for every formation', () => {
+test('slot assignment is a permutation for every formation, slots never coincide', () => {
+  const custom = [{ f: 1, r: 0, u: 0.5 }, { f: 0, r: 1, u: 0 }];
   for (const type of FORMATIONS) {
-    for (let n = 1; n <= 12; n++) {
+    for (let n = 1; n <= 20; n++) {
+      const table = slotOffsets(type, n, 20, { custom });
+      assert.equal(table.length, n, `${type} n=${n}`);
+      for (let i = 0; i < n; i++)
+        for (let j = i + 1; j < n; j++) {
+          const d = Math.hypot(table[i].f - table[j].f, table[i].r - table[j].r, table[i].u - table[j].u);
+          assert.ok(d > 5, `${type} n=${n}: slots ${i} and ${j} only ${d.toFixed(1)} m apart`);
+        }
       const members = Array.from({ length: n }, (_, i) => ({ id: i * 3, pos: { x: i * 7, y: 0, z: -i * 5 } }));
-      const slots = assignSlots(members, 0, members[0].pos, 0.3, type, 20);
+      const slots = assignSlots(members, 0, members[0].pos, 0.3, table);
       assert.equal(slots.get(0), 0);
       assert.equal(slots.size, n);
       assert.equal(new Set(slots.values()).size, n);
-      assert.equal(slotOffsets(type, n, 20).length, n);
     }
   }
+});
+
+test('3D formations have real vertical structure', () => {
+  for (const type of ['diamond', 'sphere', 'box', 'star', 'helix']) {
+    const t = slotOffsets(type, 9, 25);
+    const us = t.map((o) => o.u);
+    assert.ok(Math.max(...us) - Math.min(...us) > 20, `${type} vertical extent ${(Math.max(...us) - Math.min(...us)).toFixed(1)} m`);
+  }
+});
+
+test('custom formation is flown: followers reach the designed 3D slots', () => {
+  const customSlots = [{ f: 0, r: -1, u: 1 }, { f: 0, r: 1, u: 1 }, { f: -1, r: 0, u: -1 }, { f: 1, r: 0, u: 0 }];
+  const sim = new Simulation({ seed: 2, terrain: { preset: 'flat' }, swarm: { count: 5, formation: 'custom', customSlots } });
+  sim.run(60);
+  const m = sim.metrics();
+  assert.ok(m.formationErr < 6, `formation error ${m.formationErr.toFixed(1)} m`);
+  const L = sim.leader;
+  const ys = sim.drones.filter((d) => d.inSwarm()).map((d) => d.truePos.y - L.truePos.y);
+  assert.ok(Math.max(...ys) > 15 && Math.min(...ys) < -15, `vertical offsets ${ys.map((y) => y.toFixed(0)).join(',')}`);
+});
+
+test('enemy fire: swarm locates the threat, reroutes around it and keeps a leader', () => {
+  // A single anti-air site right on the direct route, targeting the commander.
+  const sim = new Simulation({
+    seed: 3,
+    terrain: { preset: 'flat' },
+    threats: { count: 0, custom: [{ x: 0, z: 0 }], targeting: 'leader', hitProb: 0.25 },
+  });
+  for (let i = 0; i < 60 && !sim.arrivalTime; i++) sim.run(10);
+  const th = sim.threats[0];
+  assert.ok(th.shots > 0, 'threat engaged the swarm');
+  const alive = sim.drones.filter((d) => d.inSwarm());
+  assert.ok(alive.length > 0);
+  for (const d of alive) assert.ok(d.threats.size > 0, `D${d.id} knows about the threat`);
+  const L = sim.leader;
+  assert.ok(L, 'a leader exists');
+  // The latest route keeps clear of the (estimated) threat zone.
+  const z = [...L.threats.values()][0];
+  let minD = Infinity;
+  for (const w of L.plan.waypoints.slice(L.wpIdx)) minD = Math.min(minD, Math.hypot(w.x - z.x, w.z - z.z));
+  assert.ok(minD > z.r, `remaining route passes ${minD.toFixed(0)} m from threat (r=${z.r.toFixed(0)})`);
+  assert.ok(sim.events.some((e) => e.text.includes('rerouting')), 'rerouting logged');
+});
+
+test('operator can shoot down a selected drone', () => {
+  const sim = new Simulation({ seed: 4 });
+  sim.run(30);
+  const d = sim.injectFailure(2, 'shot');
+  assert.equal(d.status, 'crashed');
+  assert.ok(sim.explosions.length > 0);
 });
