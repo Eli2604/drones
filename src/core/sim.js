@@ -10,6 +10,7 @@ import { Drone } from './drone.js';
 import { planPath } from './planner.js';
 import { slotOffsets, tableExtent, offsetToWorld } from './formation.js';
 import { dist, distH } from './vec.js';
+import { jamAt } from './jamming.js';
 
 export const FAILURE_TYPES = {
   crash: 'motor failure (falls out of the sky)',
@@ -42,7 +43,8 @@ export class Simulation {
     this.history = [];
     this.recentFixes = [];
     this.verCounter = 0;
-    this.stats = { elections: 0, leaderChanges: 0, beaconFixes: 0, failures: 0, collisions: 0 };
+    this.stats = { elections: 0, leaderChanges: 0, beaconFixes: 0, gnssFixes: 0, failures: 0, collisions: 0 };
+    this.pendingOrders = [];
     this.arrivalTime = null;
     this.mainLeaderId = null;
 
@@ -67,6 +69,18 @@ export class Simulation {
       i++;
     }
     for (const p of tc.custom) this.addThreat(p.x, p.z, true);
+    // Jammers (ground truth) and the central ground station.
+    this.jammers = [];
+    const jc = c.jammers;
+    for (let i = 0, tries = 0; i < jc.count && tries < 500; tries++) {
+      const x = mapRng.uniform(-half, half), z = mapRng.uniform(-half, half);
+      if (distH({ x, z }, c.origin) < jc.radius + 250 || distH({ x, z }, c.destination) < jc.radius + 100) continue;
+      this.addJammer(x, z, jc.type, jc.radius);
+      i++;
+    }
+    for (const p of jc.custom) this.addJammer(p.x, p.z, p.type ?? jc.type, p.r ?? jc.radius, true);
+    const cx = c.central.x ?? c.origin.x, cz = c.central.z ?? c.origin.z;
+    this.central = { x: cx, z: cz, y: this.terrain.heightAt(cx, cz) + 8 };
     this.shots = [];
     this.explosions = [];
 
@@ -170,6 +184,57 @@ export class Simulation {
     const t = { id: this.threats.length, x, z, y: this.terrain.heightAt(x, z), custom, nextShot: 0, shots: 0, kills: 0 };
     this.threats.push(t);
     return t;
+  }
+
+  addJammer(x, z, type = this.cfg.jammers.type, r = this.cfg.jammers.radius, custom = false) {
+    const j = { id: this.jammers.length, x, z, y: this.terrain.heightAt(x, z) + 6, type, r, custom };
+    this.jammers.push(j);
+    return j;
+  }
+
+  jamAt(p) {
+    return jamAt(this.jammers, p);
+  }
+
+  /**
+   * Electronic warfare, each tick: what every drone can hear and where it can fix its position.
+   * C2: in range of the central, radio working, not jammed (at the drone or at the central).
+   * GNSS: switched on and not jammed: a fix now and then. Getting jammed is noticed (reaction).
+   */
+  stepEW(dt) {
+    const c = this.cfg, cen = this.central;
+    const centralJam = this.jamAt(cen).comms;
+    for (const d of this.drones) {
+      if (!d.flying()) {
+        d.jam = { comms: 0, gnss: 0 };
+        continue;
+      }
+      const j = this.jamAt(d.truePos);
+      const was = d.jam ?? { comms: 0, gnss: 0 };
+      d.jam = j;
+      const c2 = d.radioOk && j.comms < 0.5 && centralJam < 0.5 && dist(d.truePos, cen) < c.central.range;
+      if (d.c2Ok && !c2 && d.active) this.logOnce(`c2-lost-${d.id}-${Math.floor(this.t / 20)}`, 'ew', `D${d.id} lost the link to the central${j.comms >= 0.5 ? ' (jammed)' : ''}`);
+      d.c2Ok = c2;
+      d.gnssOk = c.nav.gnss && j.gnss < 0.5;
+      if (d.active && d.status !== 'takeoff') {
+        if (j.comms >= 0.5 && was.comms < 0.5) d.onJammed('comms');
+        if (c.nav.gnss && j.gnss >= 0.5 && was.gnss < 0.5) d.onJammed('gnss');
+      }
+      if (d.gnssOk && d.status !== 'takeoff' && this.rng.next() < c.nav.gnssRate * dt) {
+        const s = c.nav.gnssSigma;
+        d.loc.absoluteFix({ x: d.truePos.x + this.rng.gauss(0, s), z: d.truePos.z + this.rng.gauss(0, s) }, s);
+        this.stats.gnssFixes++;
+      }
+    }
+  }
+
+  /** An operator order: carried out now if the leader is in contact with the central, else queued. */
+  order(kind, fn) {
+    const L = this.leader;
+    if (this.phase === 'ready' || !L || L.c2Ok !== false) return fn();
+    this.pendingOrders.push({ kind, fn });
+    this.log('ew', `Order "${kind}" queued: leader D${L.id} is out of contact with the central`);
+    return null;
   }
 
   /** Terrain masking: is the straight line from a to b above the ground everywhere? */
@@ -289,27 +354,35 @@ export class Simulation {
   }
 
   setDestination(x, z) {
-    this.cfg.destination = { x, z };
-    const L = this.leader;
-    if (this.phase !== 'ready' && L) {
-      if (this.phase === 'complete') this.phase = 'running';
-      this.arrivalTime = null;
-      L.replan('new destination');
-    }
+    return this.order('new destination', () => {
+      this.cfg.destination = { x, z };
+      const L = this.leader;
+      if (this.phase !== 'ready' && L) {
+        if (this.phase === 'complete') this.phase = 'running';
+        this.arrivalTime = null;
+        L.replan('new destination');
+      }
+      return true;
+    });
   }
 
   requestReplan() {
-    const L = this.leader;
-    if (L) L.replan('operator request');
+    return this.order('replan', () => {
+      const L = this.leader;
+      if (L) L.replan('operator request');
+      return true;
+    });
   }
 
   forceHandover() {
-    const L = this.leader;
-    if (!L) return false;
-    const s = L.bestSuccessor();
-    if (!s) return false;
-    L.handover(s.id, 'operator request');
-    return true;
+    return this.order('handover', () => {
+      const L = this.leader;
+      if (!L) return false;
+      const s = L.bestSuccessor();
+      if (!s) return false;
+      L.handover(s.id, 'operator request');
+      return true;
+    });
   }
 
   injectFailure(target, type) {
@@ -371,6 +444,15 @@ export class Simulation {
     }
 
     if (this.threats.length) this.stepThreats();
+    this.stepEW(dt);
+    if (this.pendingOrders.length && this.leader?.c2Ok) {
+      const orders = this.pendingOrders;
+      this.pendingOrders = [];
+      for (const o of orders) {
+        this.log('ew', `Order "${o.kind}" delivered: leader D${this.leader.id} is back in contact`);
+        o.fn();
+      }
+    }
 
     for (const { to, env } of this.radio.deliver()) {
       if (to.active && to.radioOk) to.receive(env);

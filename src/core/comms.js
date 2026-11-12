@@ -15,6 +15,7 @@ export function msgBytes(msg) {
   switch (msg.type) {
     case 'HB': return HEADER_BYTES + 44 + 9 * (p.formation?.slots?.length ?? 0); // id+slot+3x int16 offset
     case 'THREAT': return HEADER_BYTES + 10;
+    case 'JAM': return HEADER_BYTES + 10;
     case 'STATUS': return HEADER_BYTES + 32;
     case 'PLAN': return HEADER_BYTES + 12 + 12 * (p.waypoints?.length ?? 0);
     case 'ELECT': return HEADER_BYTES + 12;
@@ -54,6 +55,12 @@ export class Radio {
       if (dd > rEff) continue;
       let p = dd < 0.7 * rEff ? 1 : (rEff - dd) / (0.3 * rEff);
       p *= 1 - c.lossBase;
+      // a jammed receiver hears only noise (jamming.js)
+      const jam = d.jam?.comms ?? 0;
+      if (jam > 0) {
+        p *= 1 - jam;
+        if (jam >= 0.5) st.jammed = (st.jammed ?? 0) + 1;
+      }
       if (rng.next() > p) {
         st.dropped++;
         continue;

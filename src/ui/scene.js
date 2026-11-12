@@ -144,8 +144,45 @@ export class World3D {
     this.buildNoFly(sim.cfg.noFly);
     this.buildDrones(sim);
     this.buildThreats(sim);
+    this.buildJammers(sim);
     this.buildEffects();
     this.pathVer = -1;
+  }
+
+  /** Jammers (ground truth): a mast with its jamming dome (violet: radio, cyan: GNSS); the central station. */
+  buildJammers(sim) {
+    if (this.jamGroup) this.root.remove(this.jamGroup);
+    this.jamGroup = new THREE.Group();
+    this.jamObjs = [];
+    for (const j of sim.jammers) {
+      const color = j.type === 'gnss' ? 0x32d6ff : j.type === 'comms' ? 0xb36bff : 0xe05cff;
+      const g = new THREE.Group();
+      g.position.set(j.x, j.y - 6, j.z);
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 1.6, 24, 8), new THREE.MeshStandardMaterial({ color: 0x2b2f36 }));
+      mast.position.y = 12;
+      const head = new THREE.Mesh(new THREE.OctahedronGeometry(4), new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.6 }));
+      head.position.y = 27;
+      const domeMat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false });
+      const dome = new THREE.Mesh(new THREE.SphereGeometry(j.r, 40, 16, 0, Math.PI * 2, 0, Math.PI / 2), domeMat);
+      const edge = new THREE.LineSegments(new THREE.WireframeGeometry(new THREE.SphereGeometry(j.r, 16, 6, 0, Math.PI * 2, 0, Math.PI / 2)), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.22 }));
+      const label = makeLabel(`J${j.id} ${j.type === 'gnss' ? 'GNSS' : j.type === 'comms' ? 'RADIO' : 'RADIO+GNSS'}`, 'threat');
+      label.position.y = 40;
+      g.add(mast, head, dome, edge, label);
+      this.jamGroup.add(g);
+      this.jamObjs.push({ head, domeMat });
+    }
+    const c = sim.central;
+    const st = new THREE.Group();
+    st.position.set(c.x, c.y - 8, c.z);
+    const hut = new THREE.Mesh(new THREE.BoxGeometry(14, 6, 10), new THREE.MeshStandardMaterial({ color: 0x55604a }));
+    hut.position.y = 3;
+    const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.8, 22, 6), new THREE.MeshStandardMaterial({ color: 0x9aa3ad }));
+    ant.position.set(5, 14, 0);
+    const lab = makeLabel('CENTRAL (C2)', 'intel');
+    lab.position.y = 30;
+    st.add(hut, ant, lab);
+    this.jamGroup.add(st);
+    this.root.add(this.jamGroup);
   }
 
   /** Ground-truth anti-air sites with their engagement-range domes. */
@@ -471,6 +508,9 @@ export class World3D {
       this.fixLines.geometry.setDrawRange(0, k * 2);
     }
 
+    // Jammers pulse; rebuilt when one is added
+    if (this.jamObjs?.length !== sim.jammers.length) this.buildJammers(sim);
+    this.jamObjs?.forEach((o, i) => (o.domeMat.opacity = 0.05 + 0.035 * (0.5 + 0.5 * Math.sin(t * 3 + i))));
     // Threats: dome size follows the live range setting; turret flashes when firing.
     if (this.threatObjs?.length !== sim.threats.length) this.buildThreats(sim);
     const R = sim.cfg.threats.range;

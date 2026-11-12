@@ -24,6 +24,11 @@ export class Drone {
     this.status = 'ground'; // ground | takeoff | enroute | arrived | landing | landed | crashed
     this.active = true; // radio on and participating in the swarm
     this.radioOk = true;
+    this.jam = { comms: 0, gnss: 0 }; // how strongly it is jammed now (sim.stepEW)
+    this.c2Ok = true; // link to the central ground station
+    this.gnssOk = false;
+    this.jamZones = new Map(); // where the group found jamming
+    this.lastJamMsg = -1e9;
     this.failure = null;
     this.batteryCapJ = c.drone.batteryWh * 3600;
     this.batteryJ = this.batteryCapJ;
@@ -140,7 +145,46 @@ export class Drone {
   }
 
   threatZones() {
-    return [...this.threats.values()].map((th) => ({ x: th.x, z: th.z, r: th.r }));
+    return [...this.threats.values(), ...this.jamZones.values()].map((th) => ({ x: th.x, z: th.z, r: th.r }));
+  }
+
+  // ---------------------------------------------------------------- jamming
+  /**
+   * The drone noticed it is being jammed ('comms': the noise floor jumped; 'gnss': the fixes
+   * stopped). It marks the area round its estimated position, tells the group (what it sends
+   * still reaches drones outside the jammer) and the leader routes around it.
+   */
+  onJammed(kind) {
+    const jc = this.cfg.jammers;
+    const t = this.sim.t;
+    this.sim.logOnce(`jam-${kind}-${this.id}-${Math.floor(t / 15)}`, 'ew', `D${this.id} jammed: ${kind === 'gnss' ? 'GNSS lost, navigating on odometry, landmarks and ranging' : 'radio jammed'}`);
+    if (!jc.reaction) return;
+    const est = this.loc.est;
+    const isNew = this.learnJam(est.x, est.z, jc.radius * 1.15, kind);
+    if (isNew || t - this.lastJamMsg > 4) {
+      this.lastJamMsg = t;
+      this.send('JAM', { x: est.x, z: est.z, r: jc.radius * 1.15, kind }, this.cfg.comms.ttl + 1);
+    }
+    if (this.isLeader) this.onJamFound(isNew, est, kind);
+  }
+  learnJam(x, z, r, kind) {
+    for (const j of this.jamZones.values()) {
+      if (Math.hypot(j.x - x, j.z - z) < r * 0.6) {
+        j.n = Math.min(j.n + 1, 20);
+        j.t = this.sim.t;
+        return false;
+      }
+    }
+    this.jamZones.set(`${this.id}-j${this.jamZones.size}`, { x, z, r, kind, n: 1, t: this.sim.t });
+    return true;
+  }
+  onJamFound(isNew, where, kind) {
+    const t = this.sim.t;
+    if (isNew && t - (this.lastJamReplan ?? -1e9) > 3) {
+      this.lastJamReplan = t;
+      this.sim.log('ew', `Leader D${this.id}: ${kind === 'gnss' ? 'GNSS' : 'radio'} jamming near (${where.x.toFixed(0)}, ${where.z.toFixed(0)}) - rerouting around it`);
+      this.replan('avoid jammer');
+    }
   }
 
   // ---------------------------------------------------------------- helpers
@@ -294,6 +338,12 @@ export class Drone {
       case 'HANDOVER':
         this.onHandover(p);
         break;
+      case 'JAM': {
+        if (!this.cfg.jammers.reaction) break;
+        const isNew = this.learnJam(p.x, p.z, p.r, p.kind);
+        if (this.isLeader) this.onJamFound(isNew, p, p.kind);
+        break;
+      }
       case 'THREAT': {
         if (!this.cfg.threats.reaction) break;
         const isNew = this.learnThreat(p.x, p.z, p.r);

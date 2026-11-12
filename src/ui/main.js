@@ -75,6 +75,18 @@ const SCHEMA = [
     ],
   },
   {
+    title: 'Jamming & C2',
+    open: false,
+    items: [
+      { path: 'nav.gnss', label: 'GNSS available (until jammed)', type: 'checkbox' },
+      { path: 'jammers.count', label: 'Random jammers', type: 'range', min: 0, max: 8, step: 1 },
+      { path: 'jammers.radius', label: 'Jammer radius', type: 'range', min: 100, max: 900, step: 10, unit: 'm' },
+      { path: 'jammers.type', label: 'Jammer type', type: 'select', options: ['both', 'comms', 'gnss'], labels: { both: 'Radio + GNSS', comms: 'Radio (swarm + central)', gnss: 'GNSS only' } },
+      { path: 'jammers.reaction', label: 'Swarm marks, shares and avoids jamming', type: 'checkbox', live: true },
+      { path: 'central.range', label: 'Central C2 link range', type: 'range', min: 500, max: 5000, step: 100, unit: 'm', live: true },
+    ],
+  },
+  {
     title: 'Navigation & radio',
     open: false,
     items: [
@@ -317,6 +329,7 @@ const HINTS = {
   beacon: 'Click the terrain to place a landmark with known geolocation',
   nofly: 'Click the terrain to place a no-fly zone (r = 150 m); the leader replans',
   threat: 'Click the terrain to place an anti-air site (the swarm does not know where it is)',
+  jammer: 'Click the terrain to place a jammer (type and radius from Jamming & C2; the swarm does not know where it is)',
   shoot: 'Click a drone to shoot it down',
 };
 function setMode(m) {
@@ -362,6 +375,14 @@ function onPick(hit) {
       sim.cfg.noFly.push({ ...z });
       world.buildNoFly(sim.cfg.noFly);
       if (sim.phase !== 'ready') sim.requestReplan();
+      break;
+    }
+    case 'jammer': {
+      const j = { ...p, type: state.cfg.jammers.type, r: state.cfg.jammers.radius };
+      state.cfg.jammers.custom.push(j);
+      sim.cfg.jammers.custom.push({ ...j });
+      sim.addJammer(p.x, p.z, j.type, j.r, true);
+      world.buildJammers(sim);
       break;
     }
     case 'threat':
@@ -497,6 +518,7 @@ $('#btn-clear-zones').onclick = () => {
   state.cfg.noFly = [];
   state.cfg.customBeacons = [];
   state.cfg.threats.custom = [];
+  state.cfg.jammers.custom = [];
   saveConfig();
   resetSim();
 };
@@ -596,6 +618,13 @@ function updatePanels() {
   if (sim.threats.length) {
     const shots = sim.threats.reduce((a, t) => a + t.shots, 0), kills = sim.threats.reduce((a, t) => a + t.kills, 0);
     rows.splice(6, 0, ['Enemy shots / kills', `${shots} / ${kills}`], ['Threats located by swarm', L ? `${L.threats.size} / ${sim.threats.length}` : '-']);
+  }
+  if (sim.jammers.length || sim.cfg.nav.gnss) {
+    const fl = sim.drones.filter((d) => d.flying());
+    rows.splice(6, 0, ['GNSS fixes', `${sim.stats.gnssFixes}${sim.cfg.nav.gnss ? '' : ' (GNSS off)'}`],
+      ['In contact with central', `${fl.filter((d) => d.c2Ok).length} / ${fl.length}${sim.pendingOrders.length ? ` · ${sim.pendingOrders.length} order(s) waiting` : ''}`],
+      ['Jammed now (radio / GNSS)', `${fl.filter((d) => d.jam.comms >= 0.5).length} / ${fl.filter((d) => d.jam.gnss >= 0.5).length}`],
+      ['Jamming found by swarm', L ? `${L.jamZones.size} / ${sim.jammers.length}` : '-']);
   }
   if (sim.arrivalTime !== null) rows.unshift(['Arrived', `t = ${sim.arrivalTime.toFixed(1)} s`]);
   $('#status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');

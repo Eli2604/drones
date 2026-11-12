@@ -58,6 +58,9 @@ export const DEFAULT_CONFIG = {
     cameraRange: 250, // m, max slant range to recognise a landmark
     beaconDetectRate: 0.8, // recognitions per second while in view (clear weather)
     beaconCount: 14,
+    gnss: false, // satellite navigation available (until jammed); off = GNSS-denied by design
+    gnssSigma: 2.5, // m, 1-sigma horizontal error of a GNSS fix
+    gnssRate: 1, // fixes per second
   },
   threats: {
     count: 0, // randomly placed anti-air sites (away from origin/destination)
@@ -68,6 +71,16 @@ export const DEFAULT_CONFIG = {
     targeting: 'leader', // 'leader' (commander first) | 'nearest' | 'random'
     protectCommander: true, // a leader under fire hands command to a drone far from the threat
     reaction: true, // swarm reacts: evasion, dispersal, threat sharing, rerouting
+  },
+  // The central ground station (command and control). Operator orders reach the swarm only
+  // while the leader has a C2 link to it (in range, not jammed); otherwise they wait.
+  central: { x: null, z: null, range: 3000 }, // null: at the origin
+  jammers: {
+    count: 0, // randomly placed jammers (away from origin/destination)
+    custom: [], // [{x, z, type?, r?}] placed by the operator
+    radius: 350, // m
+    type: 'both', // 'comms' | 'gnss' | 'both'
+    reaction: true, // swarm marks jammed areas, shares them and routes around them
   },
   noFly: [], // [{x, z, r}]
   customBeacons: [], // [{x, z}]

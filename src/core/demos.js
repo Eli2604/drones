@@ -2,6 +2,17 @@
 // Load from the UI or with ?demo=<key> in the URL.
 
 export const DEMOS = {
+  jammed: {
+    title: 'Jammed corridor',
+    description: 'GNSS is available, but a GNSS jammer and a radio jammer sit near the direct line. Drones that fly into them lose their fixes or their links; the swarm marks the areas, shares them and routes around. Orders sent while the leader is out of contact with the central wait until it is back.',
+    config: {
+      seed: 9,
+      terrain: { preset: 'hills' },
+      swarm: { count: 8, formation: 'v' },
+      nav: { gnss: true },
+      jammers: { custom: [{ x: -300, z: 300, type: 'gnss', r: 380 }, { x: 320, z: -260, type: 'comms', r: 320 }] },
+    },
+  },
   'leader-loss': {
     title: 'Leader loss & re-election',
     description: 'Clear weather over hills. The leader crashes at 45 s, a follower loses its radio at 95 s.',
