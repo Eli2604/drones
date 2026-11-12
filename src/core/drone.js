@@ -149,6 +149,38 @@ export class Drone {
   }
 
   // ---------------------------------------------------------------- jamming
+  /** A packet reached this jammed drone over a fallback bearer (comms.js): log the switch once. */
+  /** The leader is in radio jamming (noticed itself, or a known jamming zone it is in). */
+  inJamming() {
+    if ((this.jam?.comms ?? 0) >= 0.5) return true;
+    const e = this.loc.est;
+    for (const z of this.jamZones.values()) if (z.kind !== 'gnss' && Math.hypot(e.x - z.x, e.z - z.z) < z.r) return true;
+    return false;
+  }
+
+  noteBearer(bearer, from) {
+    const t = this.sim.t;
+    if (this.lastBearer === bearer && t - (this.lastBearerT ?? -1e9) < 20) return;
+    this.lastBearer = bearer;
+    this.lastBearerT = t;
+    this.sim.logOnce('bearer-' + this.id + '-' + bearer + '-' + Math.floor(t / 20), 'ew',
+      'D' + this.id + ' radio jammed: reaching the swarm by ' + (bearer === 'optical' ? 'optical link (laser) via D' + from : 'frequency hopping'));
+  }
+
+  /**
+   * Formation scale under radio jamming: the group closes up so every drone stays within
+   * optical-link range of its neighbours (they still try to reach each other, not the central).
+   */
+  closeUpFactor() {
+    const fb = this.cfg.comms.fallback;
+    if (!fb?.optical || !fb.closeUp) return 1;
+    const t = this.sim.t;
+    const jammed = (this.jam?.comms ?? 0) >= 0.5 || (this.leaderState?.jammed && t - this.leaderState.t < 4);
+    const target = jammed ? Math.min(1, (0.4 * fb.opticalRange * Math.sqrt(this.sim.weather.cameraFactor())) / Math.max(1, this.cfg.swarm.spacing * 2)) : 1;
+    this.closeUp = (this.closeUp ?? 1) + (target - (this.closeUp ?? 1)) * Math.min(1, this.cfg.dt * 0.5);
+    return this.closeUp;
+  }
+
   /**
    * The drone noticed it is being jammed ('comms': the noise floor jumped; 'gnss': the fixes
    * stopped). It marks the area round its estimated position, tells the group (what it sends
@@ -383,7 +415,7 @@ export class Drone {
     this.leaderId = from;
     this.election = null;
     this.lastLeaderHeard = t;
-    this.leaderState = { est: p.est, vel: p.vel, heading: p.heading, t };
+    this.leaderState = { est: p.est, vel: p.vel, heading: p.heading, t, jammed: !!p.jammed };
     if (p.anchor && this.flying()) this.loc.applyGroupAnchor(p.anchor);
     this.wpIdx = p.wpIdx;
     this.arrived = p.arrived;
@@ -512,6 +544,7 @@ export class Drone {
       sigma: this.loc.sigma,
       vel: { x: this.loc.measVel.x, y: 0, z: this.loc.measVel.z },
       heading: this.heading,
+      jammed: this.inJamming(),
       wpIdx: this.wpIdx,
       planVer: this.plan?.ver ?? 0,
       arrived: this.arrived,
@@ -698,7 +731,8 @@ export class Drone {
     const off = slot !== undefined && this.slotTable[slot]
       ? this.slotTable[slot]
       : { f: -2 * sp, r: ((this.id % 5) - 2) * sp * 0.6, u: 6 }; // parking spot until assigned
-    const target = add(lp, offsetToWorld(off, L.heading));
+    const k = this.closeUpFactor();
+    const target = add(lp, offsetToWorld(k === 1 ? off : { f: off.f * k, r: off.r * k, u: off.u }, L.heading));
     this.heading = L.heading;
     const err = sub(target, est);
     const v = { x: L.vel.x + err.x * 0.5, y: err.y * 0.8, z: L.vel.z + err.z * 0.5 };

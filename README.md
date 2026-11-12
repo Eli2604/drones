@@ -9,6 +9,7 @@ The swarm flies from an origin to a destination as one unit:
 - **Low-energy radio.** Each drone transmits only as far as it needs to, and messages are relayed over several hops. Radio energy is ~85% below always-full-power.
 - **Navigation without GPS.** Each drone dead-reckons from its own odometry. Radio packets double as range measurements between drones, which keep the formation geometry consistent. Grouped telemetry anchors the swarm's shared frame to the average of all odometers. Camera recognition of known landmarks corrects the absolute position.
 - **Reacts to enemy fire.** A drone that is shot at jinks. It shares where the fire came from, the leader spreads the formation out and reroutes around located threats, and a commander under fire hands command to a drone out of range. This halves losses compared with no reaction (`npm run sweep:combat`).
+- **Survives jamming.** Jammers cut the radio (the swarm's links and the command link to the central), GNSS, or both. The swarm notices, shares where the jamming is and routes around it. Orders from the central wait until the leader is back in contact. Inside the jamming the drones keep reaching each other over other bearers: frequency hopping, and short optical (laser) links along a clear line of sight. They close up the formation so those links hold. Jammed drones still hear the swarm 100% of the time, against 11% without these fallbacks (a jammed crossing, 6 drones at 110 m spacing).
 - **Any formation, including 3D.** Pick from presets or design your own; the leader sends the slot geometry with its heartbeat.
 
 ## Run
@@ -32,6 +33,7 @@ npm run ui-check       # drives headless Chrome through the UI (needs npm start 
 | **Terrain** | Preset, plus Max height, Roughness, Hill density, Sharp ridges, Carve valley |
 | **Swarm / formation** (live) | 12 preset formations, many truly 3D (diamond = octahedron, star, sphere, box, helix), **Vertical spread**, Spacing, and **✎ Design custom formation…**: draw your own in a top and a side view |
 | **Enemy fire** | Random or placed anti-air sites with range, rate of fire, hit probability, targeting (commander first / nearest / random); switch the swarm's reactions and commander handover on/off live |
+| **Jamming & C2** | Jammer mode in the top bar places a jammer. The settings cover random jammers, radius and type (radio, GNSS, both), GNSS on/off, the central's link range, and the fallbacks under jamming (hopping, optical links and their range, closing up). In the 3D view, hopping links show yellow and optical links pink |
 | **Weather** (live) | Wind speed/direction, gusts, turbulence, rain, fog, or the presets Clear / Breezy / Storm / Fog |
 | **Kill / fail a drone** | ✖ in the drones table, 🎯 Shoot mode in the 3D view, or select a drone (click it) and use the panel: Shoot down / Radio off / Battery fault. Failures can also be scheduled, or randomised (chaos mode) |
 | **Operator** | Force a leader handover, or replan the route |

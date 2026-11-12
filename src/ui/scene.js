@@ -368,7 +368,8 @@ export class World3D {
     });
     const lg = new THREE.BufferGeometry();
     lg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * n * 6), 3));
-    this.links = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color: COLORS.link, transparent: true, opacity: 0.35 }));
+    lg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * n * 6).fill(1), 3));
+    this.links = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.45 }));
     this.links.frustumCulled = false;
     this.root.add(this.links);
 
@@ -475,7 +476,8 @@ export class World3D {
 
     // Radio links active in the last second
     {
-      const a = this.links.geometry.attributes.position;
+      const a = this.links.geometry.attributes.position, col = this.links.geometry.attributes.color;
+      const tint = { radio: new THREE.Color(COLORS.link), fhss: new THREE.Color(0xffd84d), optical: new THREE.Color(0xff6ad5) };
       let k = 0;
       if (view.links) {
         for (const [key, ts] of sim.radio.links) {
@@ -485,10 +487,14 @@ export class World3D {
           if (!p || !q || k * 2 + 1 >= a.count) continue;
           a.setXYZ(k * 2, p.x, p.y, p.z);
           a.setXYZ(k * 2 + 1, q.x, q.y, q.z);
+          const c = tint[sim.radio.bearer?.get(key) ?? 'radio'] ?? tint.radio;
+          col.setXYZ(k * 2, c.r, c.g, c.b);
+          col.setXYZ(k * 2 + 1, c.r, c.g, c.b);
           k++;
         }
       }
       a.needsUpdate = true;
+      col.needsUpdate = true;
       this.links.geometry.setDrawRange(0, k * 2);
     }
 

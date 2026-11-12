@@ -6,6 +6,13 @@
 //   in rain/fog. There is also a base packet-loss rate.
 // - Every delivered packet carries a range measurement (UWB two-way ranging).
 // - Packets are delivered one tick after they are sent.
+//
+// Under jamming (jamming.js) the swarm keeps trying to reach itself over other bearers:
+// - frequency hopping (FHSS): the radio hops over a wide band, so a jammer only hurts part
+//   of each packet; jamming bites less (comms.fhssResidual of its effect remains);
+// - an optical link (laser / IR, free-space): immune to radio jamming, but short, needs a
+//   clear line of sight over the terrain and fades in fog and rain (comms.opticalRange).
+// The link to the central is a long-haul radio link: it has no such fallback (sim.stepEW).
 
 import { clone, dist } from './vec.js';
 
@@ -30,7 +37,8 @@ export class Radio {
     this.sim = sim;
     this.pending = [];
     this.links = new Map(); // "a-b" -> last time a packet went between them
-    this.stats = { sent: 0, delivered: 0, dropped: 0, bytes: 0, energyJ: 0, fullPowerEnergyJ: 0, byType: {} };
+    this.bearer = new Map(); // "a-b" -> 'radio' | 'fhss' | 'optical' (last one used)
+    this.stats = { sent: 0, delivered: 0, dropped: 0, bytes: 0, energyJ: 0, fullPowerEnergyJ: 0, byType: {}, jammed: 0, fhss: 0, optical: 0 };
   }
 
   transmit(sender, msg, range) {
@@ -49,22 +57,36 @@ export class Radio {
     st.byType[msg.type] = (st.byType[msg.type] ?? 0) + 1;
 
     const rEff = range * weather.commFactor();
+    const fb = c.fallback ?? {};
+    const optR = fb.optical ? (fb.opticalRange ?? 250) * Math.sqrt(weather.cameraFactor()) : 0;
     for (const d of drones) {
       if (d === sender || !d.active || !d.radioOk) continue;
       const dd = dist(sender.truePos, d.truePos);
-      if (dd > rEff) continue;
-      let p = dd < 0.7 * rEff ? 1 : (rEff - dd) / (0.3 * rEff);
-      p *= 1 - c.lossBase;
-      // a jammed receiver hears only noise (jamming.js)
       const jam = d.jam?.comms ?? 0;
+      // the optical link is only worth its pointing effort when the radio is jammed at either end
+      const tryOptical = optR > 0 && dd <= optR && (jam > 0 || (sender.jam?.comms ?? 0) >= 0.5);
+      if (dd > rEff && !tryOptical) continue;
+      let pRf = dd > rEff ? 0 : dd < 0.7 * rEff ? 1 : (rEff - dd) / (0.3 * rEff);
+      pRf *= 1 - c.lossBase;
+      let bearer = 'radio';
       if (jam > 0) {
-        p *= 1 - jam;
-        if (jam >= 0.5) st.jammed = (st.jammed ?? 0) + 1;
+        // a jammed receiver hears only noise (jamming.js); hopping leaves part of the band clear
+        const r = fb.fhss ? fb.fhssResidual ?? 0.6 : 1;
+        const pPlain = pRf * (1 - jam);
+        pRf *= 1 - jam * r;
+        if (jam >= 0.5) st.jammed++;
+        if (fb.fhss && rng.next() > pPlain / Math.max(1e-9, pRf)) bearer = 'fhss';
       }
-      if (rng.next() > p) {
+      let ok = rng.next() <= pRf;
+      if (!ok && tryOptical && this.sim.lineOfSight(sender.truePos, d.truePos)) {
+        ok = rng.next() <= 0.95 * (1 - c.lossBase);
+        if (ok) bearer = 'optical';
+      }
+      if (!ok) {
         st.dropped++;
         continue;
       }
+      if (bearer !== 'radio') st[bearer]++;
       const e2 = c.rxJoulePerByte * bytes;
       d.radioEnergyJ += e2;
       d.batteryJ -= e2;
@@ -74,6 +96,8 @@ export class Radio {
       this.pending.push({ to: d, from: sender, msg });
       const key = sender.id < d.id ? `${sender.id}-${d.id}` : `${d.id}-${sender.id}`;
       this.links.set(key, t);
+      this.bearer.set(key, bearer);
+      if (bearer !== 'radio' && sender.jam?.comms < 0.5 && jam >= 0.5) d.noteBearer?.(bearer, sender.id);
     }
   }
 

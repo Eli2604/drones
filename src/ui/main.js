@@ -84,6 +84,10 @@ const SCHEMA = [
       { path: 'jammers.type', label: 'Jammer type', type: 'select', options: ['both', 'comms', 'gnss'], labels: { both: 'Radio + GNSS', comms: 'Radio (swarm + central)', gnss: 'GNSS only' } },
       { path: 'jammers.reaction', label: 'Swarm marks, shares and avoids jamming', type: 'checkbox', live: true },
       { path: 'central.range', label: 'Central C2 link range', type: 'range', min: 500, max: 5000, step: 100, unit: 'm', live: true },
+      { path: 'comms.fallback.fhss', label: 'Frequency hopping when jammed', type: 'checkbox', live: true },
+      { path: 'comms.fallback.optical', label: 'Optical (laser) links when jammed', type: 'checkbox', live: true },
+      { path: 'comms.fallback.opticalRange', label: 'Optical link range', type: 'range', min: 50, max: 600, step: 10, unit: 'm', live: true },
+      { path: 'comms.fallback.closeUp', label: 'Close up the formation when jammed', type: 'checkbox', live: true },
     ],
   },
   {
@@ -624,6 +628,7 @@ function updatePanels() {
     rows.splice(6, 0, ['GNSS fixes', `${sim.stats.gnssFixes}${sim.cfg.nav.gnss ? '' : ' (GNSS off)'}`],
       ['In contact with central', `${fl.filter((d) => d.c2Ok).length} / ${fl.length}${sim.pendingOrders.length ? ` · ${sim.pendingOrders.length} order(s) waiting` : ''}`],
       ['Jammed now (radio / GNSS)', `${fl.filter((d) => d.jam.comms >= 0.5).length} / ${fl.filter((d) => d.jam.gnss >= 0.5).length}`],
+      ['Through jamming: hopping / optical', `${rs.fhss ?? 0} / ${rs.optical ?? 0} packets`],
       ['Jamming found by swarm', L ? `${L.jamZones.size} / ${sim.jammers.length}` : '-']);
   }
   if (sim.arrivalTime !== null) rows.unshift(['Arrived', `t = ${sim.arrivalTime.toFixed(1)} s`]);

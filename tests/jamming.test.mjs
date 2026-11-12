@@ -52,3 +52,29 @@ test('without jammers nothing changes: everyone in contact, no jamming', () => {
   assert.ok(sim.drones.filter((d) => d.flying()).every((d) => d.c2Ok && d.jam.comms === 0));
   assert.equal(sim.stats.gnssFixes, 0, 'GNSS is off by default (GNSS-denied design)');
 });
+
+test('under radio jamming the swarm keeps talking: frequency hopping, optical links, closing up', () => {
+  const J = { custom: [{ x: -520, z: 520, type: 'comms', r: 350 }] };
+  const run = (fallback) => {
+    const sim = new Simulation({ seed: 5, swarm: { count: 6, spacing: 110 }, jammers: J, comms: { fallback } });
+    let inside = 0, heard = 0;
+    for (let k = 0; k < 1200; k++) {
+      sim.step();
+      for (const d of sim.drones) {
+        if (!d.flying() || d.jam.comms < 0.5) continue;
+        inside++;
+        if (sim.t - d.lastRx < 1) heard++;
+      }
+    }
+    return { sim, share: inside ? heard / inside : 1, inside };
+  };
+  const off = run({ fhss: false, optical: false, closeUp: false });
+  const on = run({ fhss: true, fhssResidual: 0.6, optical: true, opticalRange: 250, closeUp: true });
+  assert.ok(on.inside > 50, 'drones flew through the jammer');
+  assert.ok(on.sim.radio.stats.fhss > 0 && on.sim.radio.stats.optical > 0, 'packets got through by hopping and by laser');
+  assert.ok(on.share > off.share + 0.15, `jammed drones still hear the swarm (${(on.share * 100).toFixed(0)}% vs ${(off.share * 100).toFixed(0)}% without fallback)`);
+  assert.ok(on.sim.events.some((e) => /reaching the swarm by/.test(e.text)), 'the switch is logged');
+  assert.ok(on.sim.drones.some((d) => (d.closeUp ?? 1) < 0.95), 'the formation closed up');
+  // the central gets no fallback: the link to it is still lost
+  assert.ok(on.sim.events.some((e) => /lost the link to the central/.test(e.text)));
+});

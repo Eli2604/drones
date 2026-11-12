@@ -46,6 +46,14 @@ export const DEFAULT_CONFIG = {
     txOverheadJ: 0.0004,
     txJoulePerByte: 0.00006,
     rxJoulePerByte: 0.00001,
+    // When the radio is jammed the swarm keeps talking over other bearers (comms.js)
+    fallback: {
+      fhss: true, // frequency hopping: jamming bites less
+      fhssResidual: 0.6, // share of the jamming effect left with hopping
+      optical: true, // laser / IR link: immune to radio jamming, line of sight, short
+      opticalRange: 250, // m in clear air (fog and rain shorten it)
+      closeUp: true, // jammed drones close up the formation to stay within optical range
+    },
   },
   nav: {
     driftLevel: 1, // multiplier on all odometry errors
